@@ -14,6 +14,21 @@ categories = ["command-line-utilities", "network-programming"]
 name = "librespeed-cli"
 path = "src/main.rs"
 
+[features]
+default = ["rustls-tls"]
+# rustls with the ring crypto provider. Statically linked, no system TLS
+# library needed, but ring builds only for x86, x86_64, aarch64, arm and wasm32.
+rustls-tls = [
+    "dep:hyper-rustls",
+    "dep:rustls",
+    "dep:rustls-native-certs",
+    "dep:rustls-pemfile",
+    "dep:rustls-pki-types",
+]
+# Link against the system OpenSSL instead. Required on targets ring does not
+# support, such as the 32-bit PowerPC e500v2 in Turris 1.x routers.
+native-tls = ["dep:hyper-tls", "dep:native-tls", "dep:tokio-native-tls"]
+
 [dependencies]
 anyhow = "1"
 bytes = "1"
@@ -25,15 +40,18 @@ http = "1"
 http-body = "1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "http1"] }
-hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "tls12", "ring", "rustls-native-certs"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "tls12", "ring", "rustls-native-certs"], optional = true }
+hyper-tls = { version = "0.6", optional = true }
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "tokio"] }
 libc = "0.2"
+native-tls = { version = "0.2", optional = true }
 rand = "0.8"
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
-rustls-native-certs = "0.8"
-rustls-pemfile = "2"
-rustls-pki-types = "1"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"], optional = true }
+rustls-native-certs = { version = "0.8", optional = true }
+rustls-pemfile = { version = "2", optional = true }
+rustls-pki-types = { version = "1", optional = true }
 serde = { version = "1", features = ["derive"] }
+tokio-native-tls = { version = "0.3", optional = true }
 serde_json = "1"
 socket2 = { version = "0.5", features = ["all"] }
 surge-ping = "0.8"
@@ -47,3 +65,6 @@ lto = true
 codegen-units = 1
 strip = true
 panic = "abort"
+
+[dev-dependencies]
+serde_json = "1"

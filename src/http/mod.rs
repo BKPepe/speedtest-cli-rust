@@ -2,10 +2,9 @@
 //! (`--source`, `--interface`, `--fwmark`) can be honoured.
 
 pub mod connector;
+pub mod tls;
 
 use std::io;
-use std::path::Path;
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Context as _};
@@ -15,13 +14,12 @@ use http::{Method, Request, Response, StatusCode, Uri};
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Empty, Full};
 use hyper::body::Incoming;
-use hyper_rustls::HttpsConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 use url::Url;
 
-use connector::BoundConnector;
 pub use connector::{BindOptions, IpFamily};
+pub use tls::TlsSettings;
 
 /// Go's `http.Client` follows at most 10 redirects by default.
 const MAX_REDIRECTS: usize = 10;
@@ -38,113 +36,10 @@ pub fn full_body(b: Bytes) -> ReqBody {
     Full::new(b).map_err(|e| match e {}).boxed()
 }
 
-/// TLS trust configuration.
-pub struct TlsSettings<'a> {
-    /// PEM bundle replacing the system trust store (`--ca-cert`).
-    pub ca_cert: Option<&'a Path>,
-    /// Accept any certificate (`--skip-cert-verify`).
-    pub skip_verify: bool,
-}
-
-/// Certificate verifier that accepts everything, for `--skip-cert-verify`.
-#[derive(Debug)]
-struct NoVerifier(Arc<rustls::crypto::CryptoProvider>);
-
-impl rustls::client::danger::ServerCertVerifier for NoVerifier {
-    fn verify_server_cert(
-        &self,
-        _end_entity: &rustls_pki_types::CertificateDer<'_>,
-        _intermediates: &[rustls_pki_types::CertificateDer<'_>],
-        _server_name: &rustls_pki_types::ServerName<'_>,
-        _ocsp_response: &[u8],
-        _now: rustls_pki_types::UnixTime,
-    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::danger::ServerCertVerified::assertion())
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        message: &[u8],
-        cert: &rustls_pki_types::CertificateDer<'_>,
-        dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls12_signature(
-            message,
-            cert,
-            dss,
-            &self.0.signature_verification_algorithms,
-        )
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        message: &[u8],
-        cert: &rustls_pki_types::CertificateDer<'_>,
-        dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(
-            message,
-            cert,
-            dss,
-            &self.0.signature_verification_algorithms,
-        )
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        self.0.signature_verification_algorithms.supported_schemes()
-    }
-}
-
-fn build_tls_config(tls: &TlsSettings<'_>) -> anyhow::Result<rustls::ClientConfig> {
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-
-    // ALPN is left untouched: hyper-rustls sets it from `enable_http1()`.
-    if tls.skip_verify {
-        return Ok(
-            rustls::ClientConfig::builder_with_provider(provider.clone())
-                .with_safe_default_protocol_versions()?
-                .dangerous()
-                .with_custom_certificate_verifier(Arc::new(NoVerifier(provider)))
-                .with_no_client_auth(),
-        );
-    }
-
-    let mut roots = rustls::RootCertStore::empty();
-    match tls.ca_cert {
-        // `--ca-cert` replaces the system trust store, as it does in the Go version.
-        Some(path) => {
-            let pem = std::fs::read(path)
-                .with_context(|| format!("cannot read CA certificate bundle {}", path.display()))?;
-            let mut reader = std::io::BufReader::new(pem.as_slice());
-            for cert in rustls_pemfile::certs(&mut reader) {
-                roots.add(cert?)?;
-            }
-            if roots.is_empty() {
-                bail!("no certificates found in {}", path.display());
-            }
-        }
-        None => {
-            let native = rustls_native_certs::load_native_certs();
-            for cert in native.certs {
-                // Ignore individual unparsable roots, like Go's system pool does.
-                let _ = roots.add(cert);
-            }
-            if roots.is_empty() {
-                bail!("could not load any certificate from the system trust store");
-            }
-        }
-    }
-
-    Ok(rustls::ClientConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()?
-        .with_root_certificates(roots)
-        .with_no_client_auth())
-}
-
 /// The program's HTTP client.
 #[derive(Clone)]
 pub struct HttpClient {
-    inner: Client<HttpsConnector<BoundConnector>, ReqBody>,
+    inner: Client<tls::Connector, ReqBody>,
     timeout: Duration,
     user_agent: HeaderValue,
 }
@@ -152,18 +47,12 @@ pub struct HttpClient {
 impl HttpClient {
     pub fn new(
         bind: BindOptions,
-        tls: &TlsSettings<'_>,
+        tls_settings: &TlsSettings<'_>,
         timeout: Duration,
         concurrent: usize,
         user_agent: &str,
     ) -> anyhow::Result<Self> {
-        let tls_config = build_tls_config(tls)?;
-
-        let https = hyper_rustls::HttpsConnectorBuilder::new()
-            .with_tls_config(tls_config)
-            .https_or_http()
-            .enable_http1()
-            .wrap_connector(BoundConnector::new(bind));
+        let https = tls::build(bind, tls_settings)?;
 
         // Keep enough connections alive for every concurrent stream, matching the
         // Go version's MaxIdleConnsPerHost/MaxConnsPerHost tuning.

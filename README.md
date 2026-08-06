@@ -32,6 +32,42 @@ cargo build --release
 The binary lands in `target/release/librespeed-cli`. Set `SOURCE_DATE_EPOCH` for
 a reproducible build date in `--version`.
 
+### TLS backends
+
+| Feature | Crypto | System dependency | Architectures |
+| --- | --- | --- | --- |
+| `rustls-tls` (default) | rustls + ring | none, statically linked | x86, x86_64, aarch64, arm, wasm32 |
+| `native-tls` | system OpenSSL | libopenssl | anything OpenSSL builds for |
+
+`ring` ships hand-written assembly per architecture and its build script fails
+outright on anything outside the list above, so targets such as 32-bit PowerPC
+need the OpenSSL backend:
+
+```sh
+cargo build --release --no-default-features --features native-tls
+```
+
+### OpenWrt and Turris
+
+The Go CLI cannot run on 32-bit PowerPC at all — Go's toolchain only targets
+`ppc64` and `ppc64le`, which is why LibreSpeed's CLI is packaged for Turris
+Omnia and MOX but not for Turris 1.x. Rust does reach that hardware through the
+Tier 3 `powerpc-unknown-linux-muslspe` target that the OpenWrt build system
+supports, so this port can go where the Go one cannot.
+
+Build it against the OpenWrt SDK with the OpenSSL backend, since `ring` has no
+PowerPC support:
+
+```sh
+cargo build --release --no-default-features --features native-tls \
+  --target powerpc-unknown-linux-muslspe
+```
+
+Being a Tier 3 target, `powerpc-unknown-linux-muslspe` has no prebuilt `std`, so
+it needs a nightly toolchain with `-Z build-std` — which is what OpenWrt's Rust
+packaging already arranges. Point the `openssl` crate at the SDK's OpenSSL via
+`OPENSSL_DIR`, or let `pkg-config` find it through the SDK environment.
+
 ## Usage
 
 ```
@@ -101,10 +137,16 @@ plus a server certificate it signed) works as expected; use
 ## Testing
 
 ```sh
-cargo test          # unit tests
+cargo test          # unit + end-to-end tests
 cargo clippy --all-targets
 cargo fmt --check
 ```
+
+`tests/integration.rs` starts an in-process LibreSpeed backend and drives the
+built binary against it, covering the whole flow — server list, ping, download,
+upload, telemetry and every output mode — with no network access. The unit tests
+cover the jitter estimator, Go-compatible path joining and rounding, CSV and
+report rendering, server list filtering and URL scheme handling.
 
 ## License
 

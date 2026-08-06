@@ -23,6 +23,15 @@ jobs:
       - run: cargo build --verbose
       - run: cargo test --verbose
 
+  native-tls:
+    name: Test with the OpenSSL backend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --no-default-features --features native-tls --verbose
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
@@ -36,19 +45,29 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
 
   cross:
-    name: Cross build (${{ matrix.target }})
+    name: ${{ matrix.target }} (${{ matrix.tls }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         target:
-          - aarch64-unknown-linux-gnu
-          - armv7-unknown-linux-gnueabihf
-          - mips-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+          - armv7-unknown-linux-musleabihf
           - x86_64-unknown-linux-musl
+        tls: [rustls-tls]
+        include:
+          # Proves the OpenSSL backend cross-builds, the configuration targets
+          # without ring support (such as PowerPC) have to use.
+          - target: aarch64-unknown-linux-musl
+            tls: native-tls
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo install cross --locked
-      - run: cross build --release --target ${{ matrix.target }}
+      - run: cross build --release --target ${{ matrix.target }} --no-default-features --features ${{ matrix.tls }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: librespeed-cli-${{ matrix.target }}-${{ matrix.tls }}
+          path: target/${{ matrix.target }}/release/librespeed-cli
+          if-no-files-found: error
