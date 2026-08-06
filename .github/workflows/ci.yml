@@ -57,9 +57,11 @@ jobs:
         tls: [rustls-tls]
         include:
           # Proves the OpenSSL backend cross-builds, the configuration targets
-          # without ring support (such as PowerPC) have to use.
+          # without ring support (such as PowerPC) have to use. Vendored here
+          # because the cross image has no OpenSSL for the target; OpenWrt
+          # builds use plain `native-tls` against the SDK's libopenssl.
           - target: aarch64-unknown-linux-musl
-            tls: native-tls
+            tls: vendored-openssl
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

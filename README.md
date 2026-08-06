@@ -38,6 +38,7 @@ a reproducible build date in `--version`.
 | --- | --- | --- | --- |
 | `rustls-tls` (default) | rustls + ring | none, statically linked | x86, x86_64, aarch64, arm, wasm32 |
 | `native-tls` | system OpenSSL | libopenssl | anything OpenSSL builds for |
+| `vendored-openssl` | OpenSSL built from source | none, statically linked | anything OpenSSL builds for |
 
 `ring` ships hand-written assembly per architecture and its build script fails
 outright on anything outside the list above, so targets such as 32-bit PowerPC
