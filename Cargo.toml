@@ -1,0 +1,49 @@
+[package]
+name = "librespeed-cli"
+version = "1.0.12"
+edition = "2021"
+rust-version = "1.75"
+description = "Test your Internet speed with LibreSpeed"
+license = "LGPL-3.0-or-later"
+repository = "https://github.com/librespeed/speedtest-cli-rust"
+readme = "README.md"
+keywords = ["speedtest", "librespeed", "network", "benchmark", "cli"]
+categories = ["command-line-utilities", "network-programming"]
+
+[[bin]]
+name = "librespeed-cli"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+bytes = "1"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
+clap = { version = "4", features = ["derive", "string", "wrap_help"] }
+csv = "1"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+http = "1"
+http-body = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "tls12", "ring", "rustls-native-certs"] }
+hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "tokio"] }
+libc = "0.2"
+rand = "0.8"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-native-certs = "0.8"
+rustls-pemfile = "2"
+rustls-pki-types = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+socket2 = { version = "0.5", features = ["all"] }
+surge-ping = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "io-util", "sync", "fs", "signal"] }
+tower-service = "0.3"
+url = "2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
