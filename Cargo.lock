@@ -1406,7 +1406,7 @@ dependencies = [
 [[package]]
 name = "tokio"
 version = "1.53.1"
-source = "git+https://github.com/BKPepe/tokio?rev=537ba0f4fcd691f369aad96879f7cc8fa4b44a0b#537ba0f4fcd691f369aad96879f7cc8fa4b44a0b"
+source = "git+https://github.com/BKPepe/tokio?rev=74ca5203fc7dbdd00c4ed998c5394d0d18e2c799#74ca5203fc7dbdd00c4ed998c5394d0d18e2c799"
 dependencies = [
  "bytes",
  "libc",

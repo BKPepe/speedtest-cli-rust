@@ -84,4 +84,4 @@ serde_json = "1"
 # being rescheduled; it prints nothing unless TOKIO_PPCDBG is set. See
 # https://github.com/tokio-rs/tokio/issues/8352. Do not merge to master.
 [patch.crates-io]
-tokio = { git = "https://github.com/BKPepe/tokio", rev = "537ba0f4fcd691f369aad96879f7cc8fa4b44a0b" }
+tokio = { git = "https://github.com/BKPepe/tokio", rev = "74ca5203fc7dbdd00c4ed998c5394d0d18e2c799" }
