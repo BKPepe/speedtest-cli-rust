@@ -78,3 +78,11 @@ chrono = { version = "0.4", default-features = false, features = ["std", "clock"
 
 [dev-dependencies]
 serde_json = "1"
+
+# Workaround for a compiler bug: on powerpc-unknown-linux-musl the weak
+# compare-exchange never succeeds, so tokio's ScheduledIo::set_readiness spins
+# forever and the reactor never records the first event. This branch of the fork
+# is tokio 1.53.1 with that one function written out using the strong form, as
+# runtime/task/state.rs already does. Drop it once the LLVM fix has landed.
+[patch.crates-io]
+tokio = { git = "https://github.com/BKPepe/tokio", rev = "6a144b521fa81746380276419b960d03d9ba8dec" }

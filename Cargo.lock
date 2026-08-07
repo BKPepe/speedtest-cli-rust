@@ -1406,8 +1406,7 @@ dependencies = [
 [[package]]
 name = "tokio"
 version = "1.53.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"
+source = "git+https://github.com/BKPepe/tokio?rev=6a144b521fa81746380276419b960d03d9ba8dec#6a144b521fa81746380276419b960d03d9ba8dec"
 dependencies = [
  "bytes",
  "libc",
