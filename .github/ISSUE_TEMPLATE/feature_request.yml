@@ -1,0 +1,22 @@
+name: Feature request
+description: Suggest a change or an addition
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: How should it work?
+    validations:
+      required: true
+  - type: checkboxes
+    id: parity
+    attributes:
+      label: Parity
+      options:
+        - label: This exists in the Go implementation of librespeed-cli
