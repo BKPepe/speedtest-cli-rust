@@ -1,0 +1,52 @@
+name: Bug report
+description: Something does not work as expected
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: Include the command you ran and its output.
+      placeholder: |
+        $ librespeed-cli --json
+        ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect instead?
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `librespeed-cli --version`
+    validations:
+      required: true
+  - type: dropdown
+    id: tls
+    attributes:
+      label: TLS backend
+      options:
+        - rustls-tls (default)
+        - native-tls (system OpenSSL)
+        - vendored-openssl
+        - not sure
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: OS, architecture, and for routers the device and firmware
+      placeholder: Turris Omnia, Turris OS 7.x, aarch64
+    validations:
+      required: true
+  - type: textarea
+    id: debug
+    attributes:
+      label: Debug output
+      description: Output of the same command with `--debug` appended.
+      render: shell
