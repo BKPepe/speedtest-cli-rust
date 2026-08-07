@@ -1,10 +1,17 @@
 //! Minimal network diagnostic, built alongside the main binary.
 //!
-//! On 32-bit PowerPC musl every reactor-driven operation deadlocks: strace
-//! shows epoll delivering the event with the correct token, the waking thread
-//! then parking on a futex, and nothing polling again — 224 syscalls in total,
-//! no spin. Timers and blocking I/O are unaffected, and it reproduces with LTO
-//! off at opt-level 1, so it is not a codegen artefact.
+//! On 32-bit PowerPC musl every reactor-driven operation hangs. A tokio built
+//! with tracing on the reactor path narrows it to a single call: the I/O driver
+//! receives the epoll event with the correct token, resolves it to the right
+//! `ScheduledIo`, and then never returns from
+//!
+//!     self.readiness.fetch_update(AcqRel, Acquire, |curr| ...)
+//!
+//! `readiness` is an `AtomicUsize`, native on this target, and `fetch_update`
+//! is a plain `compare_exchange_weak` retry loop in userspace. A loop that
+//! never converges there makes no syscalls at all, which is why strace showed
+//! 224 calls and then silence while the process kept burning CPU — it is not
+//! blocked, it is spinning.
 //!
 //! Usage: nettest [host] [port] [stage]
 //!        nettest --self [stage]      loopback only, no external network
@@ -12,6 +19,7 @@
 //! Stages run in order of increasing risk, and each can be selected on its own
 //! so that one which hangs cannot hide the results of the others:
 //!
+//!   atomic  AtomicUsize CAS primitives on their own — no I/O, no tokio
 //!   std     blocking resolve, connect and request — the baseline
 //!   mio     raw mio: poll, register, connect — no tokio at all
 //!   noto    tokio I/O with no timer involved at all
@@ -20,9 +28,10 @@
 //!   mt      tokio, multi-thread runtime with 1 and 2 workers
 //!   all     every stage in that order (default)
 
+use std::cell::Cell;
 use std::io::{Read as _, Write as _};
 use std::net::{SocketAddr, ToSocketAddrs as _};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -98,6 +107,128 @@ fn spawn_loopback() -> SocketAddr {
     addr
 }
 
+/// How many attempts each atomic probe gets before it gives up and reports a
+/// failure. An uncontended CAS should succeed on the first or second try, so
+/// anything that exhausts this is not making progress at all.
+const ATOMIC_TRIES: u32 = 1_000_000;
+
+/// Exercises the atomic primitives the reactor depends on, with every loop
+/// bounded so a broken one reports instead of hanging.
+///
+/// `ScheduledIo::set_readiness` is `AtomicUsize::fetch_update`, which is a
+/// `compare_exchange_weak` retry loop. Nothing else is involved: no I/O, no
+/// tokio, no threads, and the atomic is uncontended, so each of these should
+/// succeed immediately. If `atomic` fails here while `std` and `mio` pass, the
+/// fault is in the target's atomics rather than anywhere in tokio.
+fn atomic_probe() {
+    use Ordering::{AcqRel, Acquire, Relaxed, Release};
+
+    // The exact call the driver makes, with the same orderings and the same
+    // starting value, but with the closure counting its own iterations so it
+    // can bail out rather than spin forever.
+    let cell = AtomicUsize::new(0);
+    let iters = Cell::new(0u32);
+    let t = Instant::now();
+    let res = cell.fetch_update(AcqRel, Acquire, |curr| {
+        iters.set(iters.get() + 1);
+        if iters.get() > ATOMIC_TRIES {
+            None
+        } else {
+            // TICK.pack(1, WRITABLE) — what set_readiness stores for a
+            // writable event on a freshly registered socket.
+            Some((curr & !0xffff) | 0x1_0002)
+        }
+    });
+    match res {
+        Ok(_) if cell.load(Relaxed) == 0x1_0002 => {
+            eprintln!(
+                "[atomic: fetch_update] ok in {:?}, {} closure call(s)",
+                t.elapsed(),
+                iters.get()
+            );
+        }
+        Ok(prev) => fail(format!(
+            "[atomic: fetch_update] WRONG: returned Ok({prev:#x}) but the cell holds {:#x}",
+            cell.load(Relaxed)
+        )),
+        Err(_) => fail(format!(
+            "[atomic: fetch_update] NO PROGRESS: gave up after {} closure calls in {:?}, \
+             cell still {:#x} — compare_exchange_weak never succeeded",
+            iters.get(),
+            t.elapsed(),
+            cell.load(Relaxed)
+        )),
+    }
+
+    // The same thing one level down, to separate a broken compare_exchange_weak
+    // from a broken fetch_update built on a working one.
+    let cell = AtomicUsize::new(0);
+    let mut tries = 0u32;
+    let mut spurious = 0u32;
+    let t = Instant::now();
+    let outcome = loop {
+        if tries >= ATOMIC_TRIES {
+            break Err(format!("{spurious} spurious failures and never succeeded"));
+        }
+        tries += 1;
+        match cell.compare_exchange_weak(0, 0x1_0002, AcqRel, Acquire) {
+            Ok(_) => break Ok(()),
+            // An uncontended CAS can fail spuriously, but the value it hands
+            // back must still be the one it compared against. Anything else
+            // means the comparison itself is wrong.
+            Err(0) => spurious += 1,
+            Err(other) => break Err(format!("compared against 0 but was given back {other:#x}")),
+        }
+    };
+    match outcome {
+        Ok(()) => eprintln!(
+            "[atomic: compare_exchange_weak] ok in {:?}, {tries} try/tries, {spurious} spurious",
+            t.elapsed()
+        ),
+        Err(why) => fail(format!(
+            "[atomic: compare_exchange_weak] NO PROGRESS after {tries} tries in {:?}: {why}",
+            t.elapsed()
+        )),
+    }
+
+    // The strong form, which must not fail spuriously at all.
+    let cell = AtomicUsize::new(0);
+    match cell.compare_exchange(0, 0x1_0002, AcqRel, Acquire) {
+        Ok(_) => eprintln!("[atomic: compare_exchange] ok"),
+        Err(other) => fail(format!(
+            "[atomic: compare_exchange] FAILED on an uncontended cell, was given back {other:#x}"
+        )),
+    }
+
+    // Single-instruction read-modify-writes, which the rest of the runtime and
+    // every Arc lean on. If these work while the CAS forms do not, the fault is
+    // specific to compare-and-swap rather than to atomics in general.
+    let cell = AtomicUsize::new(0);
+    cell.fetch_or(0x2, AcqRel);
+    cell.fetch_add(0x1_0000, AcqRel);
+    let got = cell.load(Acquire);
+    if got == 0x1_0002 {
+        eprintln!("[atomic: fetch_or + fetch_add] ok");
+    } else {
+        fail(format!(
+            "[atomic: fetch_or + fetch_add] WRONG: expected 0x10002, got {got:#x}"
+        ));
+    }
+
+    // Loads and stores, for completeness — if these were broken nothing at all
+    // would run, so this is the sanity check on the probe itself.
+    let cell = AtomicUsize::new(0);
+    cell.store(0x1_0002, Release);
+    let got = cell.load(Acquire);
+    if got == 0x1_0002 {
+        eprintln!("[atomic: store + load] ok");
+    } else {
+        fail(format!(
+            "[atomic: store + load] WRONG: expected 0x10002, got {got:#x}"
+        ));
+    }
+}
+
 /// Connects with mio directly and waits for writability, using nothing from
 /// tokio. Returns once the connection is established or the poll times out.
 fn raw_mio_probe(addr: SocketAddr) -> std::io::Result<()> {
@@ -140,7 +271,21 @@ fn main() {
     };
     let stage = args.next().unwrap_or_else(|| "all".to_string());
 
-    eprintln!("stage: {stage}  (std | mio | noto | ct | hybrid | mt | all)");
+    eprintln!("stage: {stage}  (atomic | std | mio | noto | ct | hybrid | mt | all)");
+
+    // The atomic probe touches no sockets, so on its own it needs neither a
+    // loopback listener nor name resolution. That makes it runnable anywhere,
+    // including on targets where the network stages would be pointless.
+    if stage == "atomic" {
+        eprintln!("--- atomics: no I/O, no tokio ---");
+        atomic_probe();
+        if FAILED.load(Ordering::Relaxed) {
+            eprintln!("done, with failures");
+            std::process::exit(1);
+        }
+        eprintln!("done");
+        std::process::exit(0);
+    }
 
     if self_test {
         let addr = spawn_loopback();
@@ -166,6 +311,15 @@ fn main() {
 
 fn run_stages(addr: SocketAddr, host: &str, stage: &str) {
     let want = |s: &str| stage == "all" || stage == s;
+
+    // atomic: the primitives underneath everything else, with no I/O at all.
+    //         The reactor hangs inside AtomicUsize::fetch_update on 32-bit
+    //         PowerPC, so this runs first and answers whether the fault is in
+    //         tokio or in the target's compare-and-swap.
+    if want("atomic") {
+        eprintln!("--- atomics: no I/O, no tokio ---");
+        atomic_probe();
+    }
 
     // std: the baseline. If this fails, nothing below is meaningful.
     if want("std") {
