@@ -121,10 +121,13 @@ all of them fixes rather than ports of the original quirk:
 - **Scheme-less server URLs.** A server entry such as `example.com/backend` with
   no scheme becomes `http://example.com/backend`. Go's `url.URL` produces the
   malformed `http:example.com/backend` for the same input.
-- **HTTP/1.1 only.** The Go client negotiates HTTP/2 over TLS when the server
-  offers it, which multiplexes every concurrent stream onto a single TCP
-  connection and understates throughput. This client stays on HTTP/1.1 so
-  `--concurrent` means concurrent connections.
+- **HTTP/1.1 by default, HTTP/2 behind `--http2`.** HTTP/2 carries every stream
+  over one TCP connection, so `--concurrent` would stop meaning concurrent
+  connections — and multiple connections is the standard way a speed test
+  saturates a link. Go's client negotiates h2 whenever a server offers it.
+  `--http2` enables it here too, with the flow-control windows raised to what
+  Go's transport uses (4 MiB per stream, 1 GiB per connection); the protocol
+  default of 64 KiB caps a stream at window/RTT, about 105 Mbps at 5 ms.
 - **`--interface` works on macOS** via `IP_BOUND_IF`; the Go version supports
   interface binding on Linux only. `--fwmark` remains Linux-only (`SO_MARK`),
   since there is no equivalent elsewhere.

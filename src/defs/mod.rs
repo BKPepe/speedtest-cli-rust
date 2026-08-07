@@ -18,6 +18,9 @@ pub const PROG_VERSION: &str = concat!("v", env!("CARGO_PKG_VERSION"));
 /// The build date, filled in by `build.rs`.
 pub const BUILD_DATE: &str = env!("LIBRESPEED_BUILD_DATE");
 
+/// The source revision, filled in by `build.rs`.
+pub const REVISION: &str = env!("LIBRESPEED_REVISION");
+
 /// The User-Agent sent with every request.
 pub fn user_agent() -> String {
     format!("{PROG_NAME}/{PROG_VERSION}")

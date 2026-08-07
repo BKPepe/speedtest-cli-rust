@@ -192,6 +192,12 @@ pub struct Cli {
     /// Firewall mark to set on socket
     #[arg(long, default_value_t = 0)]
     pub fwmark: u32,
+
+    /// Allow HTTP/2 when the server offers it. Off by default: HTTP/2 carries
+    /// every stream over one TCP connection, so --concurrent would no longer
+    /// mean concurrent connections, which is what a speed test measures
+    #[arg(long = "http2")]
+    pub http2: bool,
 }
 
 impl Cli {

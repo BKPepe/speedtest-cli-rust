@@ -33,6 +33,15 @@ pub const MAX_BUFFERED_RESPONSE: usize = 8 * 1024 * 1024;
 /// Telemetry replies are a short `id <n>` string.
 pub const MAX_TELEMETRY_RESPONSE: usize = 64 * 1024;
 
+/// HTTP/2 flow-control windows, matching what Go's transport uses
+/// (`transportDefaultStreamFlow` / `transportDefaultConnFlow`).
+///
+/// The protocol default is 64 KiB, which caps a stream at window/RTT: about
+/// 105 Mbps at 5 ms and 26 Mbps at 20 ms. Leaving it there would silently
+/// understate any link faster than that.
+const H2_STREAM_WINDOW: u32 = 4 * 1024 * 1024;
+const H2_CONNECTION_WINDOW: u32 = 1024 * 1024 * 1024;
+
 pub type ReqBody = BoxBody<Bytes, io::Error>;
 
 /// Whether two URLs share a scheme, host and effective port.
@@ -90,9 +99,16 @@ impl HttpClient {
 
         // Keep enough connections alive for every concurrent stream, matching the
         // Go version's MaxIdleConnsPerHost/MaxConnsPerHost tuning.
-        let inner = Client::builder(TokioExecutor::new())
-            .pool_max_idle_per_host(concurrent + 2)
-            .build(https);
+        let mut builder = Client::builder(TokioExecutor::new());
+        builder.pool_max_idle_per_host(concurrent + 2);
+
+        if tls_settings.http2 {
+            builder
+                .http2_initial_stream_window_size(H2_STREAM_WINDOW)
+                .http2_initial_connection_window_size(H2_CONNECTION_WINDOW);
+        }
+
+        let inner = builder.build(https);
 
         Ok(Self {
             inner,
@@ -172,7 +188,12 @@ impl HttpClient {
             // A replayed body must not be handed to a different origin: the
             // telemetry POST carries the measurement, the client's IP and the
             // ISP details, and 307/308 would resend all of it verbatim.
-            if !becomes_get && !same_origin(&url, &next) {
+            //
+            // Only requests that actually carry a body are affected. A 307/308
+            // on a GET has nothing to replay, and refusing it broke the common
+            // case of a scheme-less server list redirecting http to https.
+            let carries_body = !matches!(method, Method::GET | Method::HEAD);
+            if !becomes_get && carries_body && !same_origin(&url, &next) {
                 bail!(
                     "refusing to replay a {method} body across origins ({} -> {})",
                     url.host_str().unwrap_or_default(),

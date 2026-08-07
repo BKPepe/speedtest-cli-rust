@@ -96,6 +96,7 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
         &TlsSettings {
             ca_cert: cli.ca_cert.as_deref(),
             skip_verify: cli.skip_cert_verify,
+            http2: cli.http2,
         },
         Duration::from_secs(cli.timeout),
         cli.concurrent as usize,
@@ -112,6 +113,7 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
     };
 
     let servers = load_servers(cli, &client, force_scheme).await?;
+    write_debug!("Loaded {} server(s)\n", servers.len());
 
     // If --list is given, list all the servers fetched and exit.
     if cli.list {
@@ -152,7 +154,12 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
     // Otherwise select the fastest server from the list.
     write_ui!("Selecting the fastest server based on ping\n");
 
+    write_debug!(
+        "Probing {} server(s), {PING_WORKERS} at a time\n",
+        servers.len()
+    );
     let ping_list = ping_all(&servers, &ctx).await;
+    write_debug!("{} server(s) responded\n", ping_list.len());
     if ping_list.is_empty() {
         output::fatal("No server is currently available, please try again later.");
     }
@@ -165,14 +172,25 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
         .copied()
         .expect("ping list is not empty");
 
+    write_debug!(
+        "Fastest: {} ({}) at {:.2} ms\n",
+        output::sanitize(&servers[best_idx].name),
+        servers[best_idx].id,
+        ping_list
+            .iter()
+            .find(|(i, _)| *i == best_idx)
+            .map(|(_, p)| *p)
+            .unwrap_or_default()
+    );
     helper::do_speed_test(cli, std::slice::from_ref(&servers[best_idx]), &ctx).await
 }
 
 fn print_version() {
     write_out!(
-        "{} {} (built on {})\n",
+        "{} {} ({}, built on {})\n",
         defs::PROG_NAME,
         defs::PROG_VERSION,
+        defs::REVISION,
         defs::BUILD_DATE
     );
     write_out!("https://github.com/BKPepe/speedtest-cli-rust\n");
@@ -451,7 +469,13 @@ async fn ping_all(servers: &[Server], ctx: &TestContext<'_>) -> Vec<(usize, f64)
                 )
                 .await
             {
-                Ok((ping, _)) => Some((idx, ping)),
+                Ok((ping, _)) => {
+                    write_debug!(
+                        "  {} ({hostname}) {ping:.2} ms\n",
+                        output::sanitize(&server.name)
+                    );
+                    Some((idx, ping))
+                }
                 Err(_) => {
                     write_debug!(
                         "Can't ping server {} ({}), skipping\n",

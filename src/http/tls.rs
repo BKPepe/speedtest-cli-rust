@@ -18,6 +18,8 @@ pub struct TlsSettings<'a> {
     pub ca_cert: Option<&'a std::path::Path>,
     /// Accept any certificate (`--skip-cert-verify`).
     pub skip_verify: bool,
+    /// Offer h2 in ALPN alongside http/1.1 (`--http2`).
+    pub http2: bool,
 }
 
 /// Splits a PEM bundle into its individual certificates.
@@ -149,11 +151,20 @@ mod imp {
     }
 
     pub fn build(bind: BindOptions, tls: &TlsSettings<'_>) -> anyhow::Result<Connector> {
-        Ok(hyper_rustls::HttpsConnectorBuilder::new()
+        let builder = hyper_rustls::HttpsConnectorBuilder::new()
             .with_tls_config(client_config(tls)?)
-            .https_or_http()
-            .enable_http1()
-            .wrap_connector(BoundConnector::new(bind)))
+            .https_or_http();
+
+        // ALPN decides the protocol, so h2 is only reachable when offered here.
+        Ok(if tls.http2 {
+            builder
+                .enable_all_versions()
+                .wrap_connector(BoundConnector::new(bind))
+        } else {
+            builder
+                .enable_http1()
+                .wrap_connector(BoundConnector::new(bind))
+        })
     }
 }
 
@@ -185,6 +196,10 @@ mod imp {
             }
             // `--ca-cert` replaces the system trust store, as it does in the Go version.
             builder.disable_built_in_roots(true);
+        }
+
+        if tls.http2 {
+            builder.request_alpns(&["h2", "http/1.1"]);
         }
 
         let connector = builder.build().context("cannot initialise TLS")?;
