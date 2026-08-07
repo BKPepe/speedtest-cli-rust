@@ -295,7 +295,7 @@ fn run_stages(addr: SocketAddr, host: &str, stage: &str) {
                     eprintln!("       -> {head:?}");
                 }
                 Ok(Err(e)) => fail(format!("[hybrid: async request] FAILED: {e}")),
-                Err(_) => fail(format!("[hybrid: async request] TIMED OUT after 10s")),
+                Err(_) => fail("[hybrid: async request] TIMED OUT after 10s".to_string()),
             }
         });
     }
