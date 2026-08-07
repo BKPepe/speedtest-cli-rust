@@ -129,7 +129,52 @@ fn main() {
         }
     });
 
-    // 3. The same over tokio. If the blocking path above worked and this hangs,
+    // 3. The current_thread runtime: a different scheduler, with the I/O
+    //    driver on the same thread and no cross-thread wakeups. If the
+    //    multi-thread runtime deadlocks and this does not, it is both a
+    //    workaround and a narrowing of where the fault lies.
+    eprintln!("--- tokio: current_thread runtime ---");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+
+    rt.block_on(async {
+        step("current_thread: connect (10s timeout)");
+        let t = Instant::now();
+        match tokio::time::timeout(
+            Duration::from_secs(10),
+            tokio::net::TcpStream::connect(addr),
+        )
+        .await
+        {
+            Ok(Ok(mut s)) => {
+                ok("current_thread: connect", t);
+                step("current_thread: request (10s timeout)");
+                let t = Instant::now();
+                let req = format!("GET / HTTP/1.0\r\nHost: {host}\r\n\r\n");
+                let fut = async {
+                    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+                    s.write_all(req.as_bytes()).await?;
+                    let mut buf = [0u8; 64];
+                    let n = s.read(&mut buf).await?;
+                    Ok::<_, std::io::Error>(String::from_utf8_lossy(&buf[..n.min(40)]).into_owned())
+                };
+                match tokio::time::timeout(Duration::from_secs(10), fut).await {
+                    Ok(Ok(head)) => {
+                        ok("current_thread: request", t);
+                        eprintln!("       -> {head:?}");
+                    }
+                    Ok(Err(e)) => eprintln!("[current_thread: request] FAILED: {e}"),
+                    Err(_) => eprintln!("[current_thread: request] TIMED OUT after 10s"),
+                }
+            }
+            Ok(Err(e)) => eprintln!("[current_thread: connect] FAILED: {e}"),
+            Err(_) => eprintln!("[current_thread: connect] TIMED OUT after 10s"),
+        }
+    });
+
+    // 4. The same over tokio. If the blocking path above worked and this hangs,
     //    the fault is in the async I/O driver rather than in the network.
     //    This runs last: when it hangs, nothing after it would execute.
     for workers in [1usize, 2] {
