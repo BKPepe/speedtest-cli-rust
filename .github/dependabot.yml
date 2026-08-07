@@ -1,0 +1,39 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: "deps"
+    groups:
+      # Keep the interlocking hyper/rustls stacks in one PR each: bumping them
+      # piecemeal tends to produce PRs that cannot build on their own.
+      hyper:
+        patterns:
+          - "hyper*"
+          - "http*"
+          - "tower*"
+      tls:
+        patterns:
+          - "rustls*"
+          - "native-tls"
+          - "tokio-native-tls"
+      minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: "ci"
+    groups:
+      actions:
+        patterns:
+          - "*"

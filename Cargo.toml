@@ -1,0 +1,79 @@
+[package]
+name = "librespeed-cli"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.93.1"
+description = "Test your Internet speed with LibreSpeed"
+license = "LGPL-3.0-or-later"
+repository = "https://github.com/BKPepe/speedtest-cli-rust"
+readme = "README.md"
+keywords = ["speedtest", "librespeed", "network", "benchmark", "cli"]
+categories = ["command-line-utilities", "network-programming"]
+
+[lib]
+name = "librespeed_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "librespeed-cli"
+path = "src/main.rs"
+
+[features]
+default = ["rustls-tls"]
+# rustls with the ring crypto provider. Statically linked, no system TLS
+# library needed, but ring builds only for x86, x86_64, aarch64, arm and wasm32.
+rustls-tls = [
+    "dep:hyper-rustls",
+    "dep:rustls",
+    "dep:rustls-native-certs",
+    "dep:rustls-pki-types",
+]
+# Link against the system OpenSSL instead. Required on targets ring does not
+# support, such as the 32-bit PowerPC e500v2 in Turris 1.x routers. This is what
+# OpenWrt packaging wants: it reuses the libopenssl already in the image.
+native-tls = ["dep:hyper-tls", "dep:native-tls", "dep:tokio-native-tls"]
+# As above, but builds OpenSSL from source and links it statically, for
+# cross-compiling without the target's OpenSSL headers at hand.
+vendored-openssl = ["native-tls", "native-tls/vendored"]
+
+[dependencies]
+anyhow = "1"
+bytes = "1"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
+clap = { version = "4", features = ["derive", "string", "wrap_help"] }
+csv = "1"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+http = "1"
+http-body = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "tls12", "ring", "rustls-native-certs"], optional = true }
+hyper-tls = { version = "0.6", optional = true }
+hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "tokio"] }
+libc = "0.2"
+native-tls = { version = "0.2", optional = true }
+rand = "0.8"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"], optional = true }
+rustls-native-certs = { version = "0.8", optional = true }
+rustls-pki-types = { version = "1", optional = true }
+serde = { version = "1", features = ["derive"] }
+tokio-native-tls = { version = "0.3", optional = true }
+serde_json = "1"
+socket2 = { version = "0.5", features = ["all"] }
+surge-ping = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "io-util", "sync", "fs", "signal"] }
+tower-service = "0.3"
+url = "2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[build-dependencies]
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+
+[dev-dependencies]
+serde_json = "1"
