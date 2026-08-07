@@ -132,6 +132,74 @@ fn main() {
         });
     }
 
+    // 3. The proposed workaround: connect with the blocking API, hand the
+    //    ready socket to tokio, and do the request asynchronously. If stage 2
+    //    hangs in connect but this succeeds, async read/write is fine and only
+    //    the async connect needs avoiding.
+    eprintln!("--- hybrid: blocking connect, async request ---");
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .expect("runtime");
+
+    rt.block_on(async {
+        step("hybrid: blocking connect");
+        let t = Instant::now();
+        let std_stream = match tokio::task::spawn_blocking(move || {
+            let s = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(10))?;
+            s.set_nonblocking(true)?;
+            Ok::<_, std::io::Error>(s)
+        })
+        .await
+        {
+            Ok(Ok(s)) => {
+                ok("hybrid: blocking connect", t);
+                s
+            }
+            Ok(Err(e)) => {
+                eprintln!("[hybrid: blocking connect] FAILED: {e}");
+                return;
+            }
+            Err(e) => {
+                eprintln!("[hybrid: blocking connect] JOIN FAILED: {e}");
+                return;
+            }
+        };
+
+        step("hybrid: from_std");
+        let t = Instant::now();
+        let mut s = match tokio::net::TcpStream::from_std(std_stream) {
+            Ok(s) => {
+                ok("hybrid: from_std", t);
+                s
+            }
+            Err(e) => {
+                eprintln!("[hybrid: from_std] FAILED: {e}");
+                return;
+            }
+        };
+
+        step("hybrid: async request (10s timeout)");
+        let t = Instant::now();
+        let req = format!("GET / HTTP/1.0\r\nHost: {host}\r\n\r\n");
+        let fut = async {
+            use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+            s.write_all(req.as_bytes()).await?;
+            let mut buf = [0u8; 64];
+            let n = s.read(&mut buf).await?;
+            Ok::<_, std::io::Error>(String::from_utf8_lossy(&buf[..n.min(40)]).into_owned())
+        };
+        match tokio::time::timeout(Duration::from_secs(10), fut).await {
+            Ok(Ok(head)) => {
+                ok("hybrid: async request", t);
+                eprintln!("       -> {head:?}");
+            }
+            Ok(Err(e)) => eprintln!("[hybrid: async request] FAILED: {e}"),
+            Err(_) => eprintln!("[hybrid: async request] TIMED OUT after 10s"),
+        }
+    });
+
     eprintln!("done");
     std::process::exit(0);
 }
