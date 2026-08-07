@@ -13,6 +13,7 @@
 //! so that one which hangs cannot hide the results of the others:
 //!
 //!   std     blocking resolve, connect and request — the baseline
+//!   mio     raw mio: poll, register, connect — no tokio at all
 //!   noto    tokio I/O with no timer involved at all
 //!   ct      tokio, current_thread runtime
 //!   hybrid  blocking connect handed to tokio via from_std, async request
@@ -97,6 +98,33 @@ fn spawn_loopback() -> SocketAddr {
     addr
 }
 
+/// Connects with mio directly and waits for writability, using nothing from
+/// tokio. Returns once the connection is established or the poll times out.
+fn raw_mio_probe(addr: SocketAddr) -> std::io::Result<()> {
+    use mio::{Events, Interest, Poll, Token};
+
+    let mut poll = Poll::new()?;
+    let mut events = Events::with_capacity(16);
+    let mut sock = mio::net::TcpStream::connect(addr)?;
+    poll.registry()
+        .register(&mut sock, Token(0), Interest::WRITABLE)?;
+
+    poll.poll(&mut events, Some(Duration::from_secs(10)))?;
+    for event in events.iter() {
+        if event.token() == Token(0) && event.is_writable() {
+            // A connect error surfaces here rather than from connect() itself.
+            return match sock.take_error()? {
+                Some(e) => Err(e),
+                None => Ok(()),
+            };
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        "no writable event within 10s",
+    ))
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let mut host = args.next().unwrap_or_else(|| "librespeed.org".to_string());
@@ -112,7 +140,7 @@ fn main() {
     };
     let stage = args.next().unwrap_or_else(|| "all".to_string());
 
-    eprintln!("stage: {stage}  (std | noto | ct | hybrid | mt | all)");
+    eprintln!("stage: {stage}  (std | mio | noto | ct | hybrid | mt | all)");
 
     if self_test {
         let addr = spawn_loopback();
@@ -161,6 +189,20 @@ fn run_stages(addr: SocketAddr, host: &str, stage: &str) {
                 }
             }
             Err(e) => fail(format!("[std: connect] FAILED: {e}")),
+        }
+    }
+
+    // mio: the layer under tokio, driven by hand. This is the question a
+    //      maintainer will ask first — whether the fault is in mio's epoll
+    //      handling or in tokio's use of it — and it decides where the bug
+    //      report belongs.
+    if want("mio") {
+        eprintln!("--- raw mio: no tokio ---");
+        step("mio: connect + wait for writable (10s)");
+        let t = Instant::now();
+        match raw_mio_probe(addr) {
+            Ok(()) => ok("mio: connect", t),
+            Err(e) => fail(format!("[mio: connect] FAILED: {e}")),
         }
     }
 

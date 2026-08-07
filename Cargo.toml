@@ -64,6 +64,7 @@ surge-ping = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "io-util", "sync", "fs", "signal"] }
 tower-service = "0.3"
 url = "2"
+mio = { version = "1.2.2", features = ["os-poll", "net"] }
 
 [profile.release]
 opt-level = 3
