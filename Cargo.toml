@@ -78,3 +78,10 @@ chrono = { version = "0.4", default-features = false, features = ["std", "clock"
 
 [dev-dependencies]
 serde_json = "1"
+
+# Temporary, for the 32-bit PowerPC reactor deadlock only. This branch of the
+# fork is tokio 1.53.1 plus tracing of the path from the epoll event to the task
+# being rescheduled; it prints nothing unless TOKIO_PPCDBG is set. See
+# https://github.com/tokio-rs/tokio/issues/8352. Do not merge to master.
+[patch.crates-io]
+tokio = { git = "https://github.com/BKPepe/tokio", rev = "537ba0f4fcd691f369aad96879f7cc8fa4b44a0b" }
