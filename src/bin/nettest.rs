@@ -7,11 +7,13 @@
 //! off at opt-level 1, so it is not a codegen artefact.
 //!
 //! Usage: nettest [host] [port] [stage]
+//!        nettest --self [stage]      loopback only, no external network
 //!
 //! Stages run in order of increasing risk, and each can be selected on its own
 //! so that one which hangs cannot hide the results of the others:
 //!
 //!   std     blocking resolve, connect and request — the baseline
+//!   noto    tokio I/O with no timer involved at all
 //!   ct      tokio, current_thread runtime
 //!   hybrid  blocking connect handed to tokio via from_std, async request
 //!   mt      tokio, multi-thread runtime with 1 and 2 workers
@@ -19,9 +21,18 @@
 
 use std::io::{Read as _, Write as _};
 use std::net::{SocketAddr, ToSocketAddrs as _};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+/// Set by any stage that fails or stalls, so the exit code reflects it.
+static FAILED: AtomicBool = AtomicBool::new(false);
+
+fn fail(msg: String) {
+    FAILED.store(true, Ordering::Relaxed);
+    eprintln!("{msg}");
+}
 
 fn step(name: &str) {
     eprintln!("[{name}] ...");
@@ -61,23 +72,53 @@ async fn tokio_probe(label: &str, addr: SocketAddr, host: &str) {
                     ok(&format!("{label}: request"), t);
                     eprintln!("       -> {head:?}");
                 }
-                Ok(Err(e)) => eprintln!("[{label}: request] FAILED: {e}"),
-                Err(_) => eprintln!("[{label}: request] TIMED OUT after 10s"),
+                Ok(Err(e)) => fail(format!("[{label}: request] FAILED: {e}")),
+                Err(_) => fail(format!("[{label}: request] TIMED OUT after 10s")),
             }
         }
-        Ok(Err(e)) => eprintln!("[{label}: connect] FAILED: {e}"),
-        Err(_) => eprintln!("[{label}: connect] TIMED OUT after 10s"),
+        Ok(Err(e)) => fail(format!("[{label}: connect] FAILED: {e}")),
+        Err(_) => fail(format!("[{label}: connect] TIMED OUT after 10s")),
     }
+}
+
+/// Serves one canned HTTP response on a loopback port, so the tokio stages can
+/// run with no external network — which is what makes this usable from CI.
+fn spawn_loopback() -> SocketAddr {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let addr = listener.local_addr().expect("loopback addr");
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut s) = stream else { continue };
+            let mut buf = [0u8; 512];
+            let _ = s.read(&mut buf);
+            let _ = s.write_all(b"HTTP/1.0 200 OK\r\nContent-Length: 2\r\n\r\nok");
+        }
+    });
+    addr
 }
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let host = args.next().unwrap_or_else(|| "librespeed.org".to_string());
-    let port: u16 = args.next().and_then(|p| p.parse().ok()).unwrap_or(80);
+    let mut host = args.next().unwrap_or_else(|| "librespeed.org".to_string());
+    let self_test = host == "--self";
+    if self_test {
+        host = "127.0.0.1".to_string();
+    }
+    let host = host;
+    let port: u16 = if self_test {
+        0
+    } else {
+        args.next().and_then(|p| p.parse().ok()).unwrap_or(80)
+    };
     let stage = args.next().unwrap_or_else(|| "all".to_string());
-    let want = |s: &str| stage == "all" || stage == s;
 
-    eprintln!("stage: {stage}  (std | ct | hybrid | mt | all)");
+    eprintln!("stage: {stage}  (std | noto | ct | hybrid | mt | all)");
+
+    if self_test {
+        let addr = spawn_loopback();
+        eprintln!("self test against {addr}");
+        return run_stages(addr, &host, &stage);
+    }
 
     // Resolution is blocking and known to work, so it happens once up front and
     // every stage below shares the result.
@@ -86,13 +127,17 @@ fn main() {
     let addrs: Vec<_> = match (host.as_str(), port).to_socket_addrs() {
         Ok(a) => a.collect(),
         Err(e) => {
-            eprintln!("[resolve] FAILED: {e}");
+            fail(format!("[resolve] FAILED: {e}"));
             std::process::exit(1);
         }
     };
     ok("resolve", t);
     eprintln!("       -> {addrs:?}");
-    let addr = addrs[0];
+    run_stages(addrs[0], &host, &stage);
+}
+
+fn run_stages(addr: SocketAddr, host: &str, stage: &str) {
+    let want = |s: &str| stage == "all" || stage == s;
 
     // std: the baseline. If this fails, nothing below is meaningful.
     if want("std") {
@@ -112,11 +157,45 @@ fn main() {
                         ok("std: request", t);
                         eprintln!("       -> {:?}", String::from_utf8_lossy(&buf[..n.min(40)]));
                     }
-                    Err(e) => eprintln!("[std: request] FAILED: {e}"),
+                    Err(e) => fail(format!("[std: request] FAILED: {e}")),
                 }
             }
-            Err(e) => eprintln!("[std: connect] FAILED: {e}"),
+            Err(e) => fail(format!("[std: connect] FAILED: {e}")),
         }
+    }
+
+    // noto: the same I/O with no tokio::time::timeout anywhere. Every stage
+    //       that hangs so far wrapped the I/O in a timer, and the only stage
+    //       that passed was a bare sleep with no I/O — so the timer is as much
+    //       a suspect as the reactor. tokio's AtomicU64 falls back to a Mutex
+    //       on targets without 64-bit atomics, and it is the timer entry state
+    //       that uses it. No timeout here: interrupt if it hangs.
+    if want("noto") {
+        eprintln!("--- tokio: I/O without any timer (Ctrl+C if it hangs) ---");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        rt.block_on(async {
+            step("noto: connect");
+            let t = Instant::now();
+            match tokio::net::TcpStream::connect(addr).await {
+                Ok(mut s) => {
+                    ok("noto: connect", t);
+                    step("noto: request");
+                    let t = Instant::now();
+                    match async_request(&mut s, host).await {
+                        Ok(head) => {
+                            ok("noto: request", t);
+                            eprintln!("       -> {head:?}");
+                        }
+                        Err(e) => fail(format!("[noto: request] FAILED: {e}")),
+                    }
+                }
+                Err(e) => fail(format!("[noto: connect] FAILED: {e}")),
+            }
+        });
     }
 
     // ct: driver on the same thread, no cross-thread wakeups.
@@ -126,7 +205,7 @@ fn main() {
             .enable_all()
             .build()
             .expect("runtime");
-        rt.block_on(tokio_probe("current_thread", addr, &host));
+        rt.block_on(tokio_probe("current_thread", addr, host));
     }
 
     // hybrid: blocking connect, socket handed to tokio, request asynchronous.
@@ -152,8 +231,8 @@ fn main() {
                     ok("hybrid: blocking connect", t);
                     s
                 }
-                Ok(Err(e)) => return eprintln!("[hybrid: blocking connect] FAILED: {e}"),
-                Err(e) => return eprintln!("[hybrid: blocking connect] JOIN FAILED: {e}"),
+                Ok(Err(e)) => return fail(format!("[hybrid: blocking connect] FAILED: {e}")),
+                Err(e) => return fail(format!("[hybrid: blocking connect] JOIN FAILED: {e}")),
             };
 
             step("hybrid: from_std");
@@ -163,19 +242,18 @@ fn main() {
                     ok("hybrid: from_std", t);
                     s
                 }
-                Err(e) => return eprintln!("[hybrid: from_std] FAILED: {e}"),
+                Err(e) => return fail(format!("[hybrid: from_std] FAILED: {e}")),
             };
 
             step("hybrid: async request (10s timeout)");
             let t = Instant::now();
-            match tokio::time::timeout(Duration::from_secs(10), async_request(&mut s, &host)).await
-            {
+            match tokio::time::timeout(Duration::from_secs(10), async_request(&mut s, host)).await {
                 Ok(Ok(head)) => {
                     ok("hybrid: async request", t);
                     eprintln!("       -> {head:?}");
                 }
-                Ok(Err(e)) => eprintln!("[hybrid: async request] FAILED: {e}"),
-                Err(_) => eprintln!("[hybrid: async request] TIMED OUT after 10s"),
+                Ok(Err(e)) => fail(format!("[hybrid: async request] FAILED: {e}")),
+                Err(_) => fail(format!("[hybrid: async request] TIMED OUT after 10s")),
             }
         });
     }
@@ -189,10 +267,14 @@ fn main() {
                 .enable_all()
                 .build()
                 .expect("runtime");
-            rt.block_on(tokio_probe(&format!("mt{workers}"), addr, &host));
+            rt.block_on(tokio_probe(&format!("mt{workers}"), addr, host));
         }
     }
 
+    if FAILED.load(Ordering::Relaxed) {
+        eprintln!("done, with failures");
+        std::process::exit(1);
+    }
     eprintln!("done");
     std::process::exit(0);
 }
