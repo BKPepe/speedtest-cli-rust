@@ -227,14 +227,8 @@ fn resolve_telemetry(cli: &Cli) -> anyhow::Result<TelemetryServer> {
     }
 
     if let Some(path) = &cli.telemetry_json {
-        let b = std::fs::read(path).map_err(|e| {
-            write_error!("Cannot read {path}: {e}\n");
-            e
-        })?;
-        telemetry = serde_json::from_slice(&b).map_err(|e| {
-            write_error!("Error parsing {path}: {e}\n");
-            e
-        })?;
+        let b = std::fs::read(path).with_context(|| format!("Cannot read {path}"))?;
+        telemetry = serde_json::from_slice(&b).with_context(|| format!("Error parsing {path}"))?;
     }
 
     match &cli.telemetry_level {
@@ -357,19 +351,14 @@ async fn load_servers(
                     write_ui!("Retry with /.well-known/librespeed\n");
                     fetch_server_list(client, &format!("{server_url}/.well-known/librespeed"))
                         .await
-                        .map_err(|e| {
-                            write_error!("Error when fetching server list: {e:#}\n");
-                            e
-                        })?
+                        .context("Error when fetching server list")?
                 }
             }
         }
     };
 
-    let servers: Vec<Server> = serde_json::from_slice(&raw).map_err(|e| {
-        write_error!("Error when fetching server list: {e}\n");
-        e
-    })?;
+    let servers: Vec<Server> =
+        serde_json::from_slice(&raw).context("Error when fetching server list")?;
 
     preprocess_servers(servers, force_scheme, &cli.exclude, &cli.server, filter)
 }
