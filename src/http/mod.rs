@@ -5,6 +5,8 @@ pub mod connector;
 pub mod tls;
 
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Context as _};
@@ -83,6 +85,10 @@ async fn collect_limited(body: Incoming, limit: usize) -> anyhow::Result<Bytes> 
 #[derive(Clone)]
 pub struct HttpClient {
     inner: Client<tls::Connector, ReqBody>,
+    /// Offers every suite, used once the forced one turns out to be refused.
+    fallback: Option<Client<tls::Connector, ReqBody>>,
+    /// Latches once the fallback has been needed, so it is tried only once.
+    relaxed: Arc<AtomicBool>,
     timeout: Duration,
     user_agent: HeaderValue,
 }
@@ -95,7 +101,21 @@ impl HttpClient {
         concurrent: usize,
         user_agent: &str,
     ) -> anyhow::Result<Self> {
-        let https = tls::build(bind, tls_settings)?;
+        let https = tls::build(bind.clone(), tls_settings)?;
+
+        // When a single suite is being forced, keep a client that offers the
+        // full set. A server that cannot do ChaCha20 would otherwise fail the
+        // handshake outright, and a measurement tool should not refuse to
+        // measure because it wanted a faster cipher.
+        let fallback = if tls_settings.chacha_only {
+            let relaxed = TlsSettings {
+                chacha_only: false,
+                ..*tls_settings
+            };
+            Some(tls::build(bind, &relaxed)?)
+        } else {
+            None
+        };
 
         // Keep enough connections alive for every concurrent stream, matching the
         // Go version's MaxIdleConnsPerHost/MaxConnsPerHost tuning.
@@ -109,12 +129,31 @@ impl HttpClient {
         }
 
         let inner = builder.build(https);
+        let fallback = fallback.map(|f| {
+            let mut b = Client::builder(TokioExecutor::new());
+            b.pool_max_idle_per_host(concurrent + 2);
+            if tls_settings.http2 {
+                b.http2_initial_stream_window_size(H2_STREAM_WINDOW)
+                    .http2_initial_connection_window_size(H2_CONNECTION_WINDOW);
+            }
+            b.build(f)
+        });
 
         Ok(Self {
             inner,
+            fallback,
+            relaxed: Arc::new(AtomicBool::new(false)),
             timeout,
             user_agent: HeaderValue::from_str(user_agent)?,
         })
+    }
+
+    /// The client to issue the next request with.
+    fn client(&self) -> &Client<tls::Connector, ReqBody> {
+        match (&self.fallback, self.relaxed.load(Ordering::Relaxed)) {
+            (Some(f), true) => f,
+            _ => &self.inner,
+        }
     }
 
     /// The configured per-request timeout (`--timeout`).
@@ -157,7 +196,32 @@ impl HttpClient {
                 mk_body()
             };
 
-            let resp = self.inner.request(builder.body(body)?).await?;
+            let req = builder.body(body)?;
+            let resp = match self.client().request(req).await {
+                Ok(resp) => resp,
+                Err(e) => {
+                    // A server that will not do the forced suite refuses the
+                    // handshake. Drop to the full set and try once more; the
+                    // latch keeps this to a single switch per client.
+                    if self.fallback.is_some() && !self.relaxed.swap(true, Ordering::Relaxed) {
+                        let retry = Request::builder()
+                            .method(method.clone())
+                            .uri(url.as_str().parse::<Uri>()?);
+                        let retry = headers.iter().fold(
+                            retry.header(USER_AGENT, self.user_agent.clone()),
+                            |b, (n, v)| b.header(n.clone(), v.clone()),
+                        );
+                        let body = if method == Method::GET || method == Method::HEAD {
+                            empty_body()
+                        } else {
+                            mk_body()
+                        };
+                        self.client().request(retry.body(body)?).await?
+                    } else {
+                        return Err(e.into());
+                    }
+                }
+            };
 
             let status = resp.status();
             if !status.is_redirection() {

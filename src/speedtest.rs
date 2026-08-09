@@ -97,6 +97,9 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
             ca_cert: cli.ca_cert.as_deref(),
             skip_verify: cli.skip_cert_verify,
             http2: cli.http2,
+            // Without AES acceleration, ChaCha20-Poly1305 is several times
+            // faster, and the server will not choose it on its own.
+            chacha_only: !crate::http::tls::has_aes_acceleration(),
         },
         Duration::from_secs(cli.timeout),
         cli.concurrent as usize,

@@ -20,6 +20,13 @@ pub struct TlsSettings<'a> {
     pub skip_verify: bool,
     /// Offer h2 in ALPN alongside http/1.1 (`--http2`).
     pub http2: bool,
+    /// Offer ChaCha20-Poly1305 and nothing else.
+    ///
+    /// Ordering the suites is not enough: under TLS 1.3 the server chooses,
+    /// and the ones measured here take AES-256 whatever order the client
+    /// sends. Offering a single suite leaves no choice. Only worth doing where
+    /// the CPU has no AES acceleration -- see `has_aes_acceleration`.
+    pub chacha_only: bool,
 }
 
 /// Splits a PEM bundle into its individual certificates.
@@ -103,7 +110,14 @@ mod imp {
     }
 
     fn client_config(tls: &TlsSettings<'_>) -> anyhow::Result<rustls::ClientConfig> {
-        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let provider = {
+            let mut base = rustls::crypto::ring::default_provider();
+            if tls.chacha_only {
+                base.cipher_suites
+                    .retain(|cs| format!("{:?}", cs.suite()).contains("CHACHA20"));
+            }
+            Arc::new(base)
+        };
 
         // ALPN is left untouched: hyper-rustls sets it from `enable_http1()`.
         if tls.skip_verify {
@@ -217,3 +231,44 @@ mod imp {
 compile_error!("enable exactly one TLS backend: `rustls-tls` (default) or `native-tls`");
 
 pub use imp::{build, Connector};
+
+/// Whether this CPU can do AES-GCM in hardware.
+///
+/// Mirrors the list Go's `crypto/tls` keeps in `hasAESGCMHardwareSupport`, and
+/// exists for the same reason: without acceleration, AES-GCM is several times
+/// slower than ChaCha20-Poly1305, and which one gets used decides what an
+/// HTTPS measurement is actually bounded by. Measured on an e500v2, the core in
+/// a Turris 1.x: AES-128-GCM 8.5 MB/s against 48.6 MB/s for ChaCha20-Poly1305.
+///
+/// Detection is deliberately conservative. Where a target has acceleration but
+/// no way to detect it at runtime, reporting `true` keeps the default
+/// behaviour, which is the safe direction: preferring ChaCha there would cost
+/// speed rather than gain it.
+pub fn has_aes_acceleration() -> bool {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        std::arch::is_x86_feature_detected!("aes")
+            && std::arch::is_x86_feature_detected!("pclmulqdq")
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        std::arch::is_aarch64_feature_detected!("aes")
+            && std::arch::is_aarch64_feature_detected!("pmull")
+    }
+    // 32-bit PowerPC has no AES instructions in any implementation, and neither
+    // does 32-bit MIPS. Everything else is assumed to have them.
+    #[cfg(any(target_arch = "powerpc", target_arch = "mips"))]
+    {
+        false
+    }
+    #[cfg(not(any(
+        target_arch = "x86",
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        target_arch = "powerpc",
+        target_arch = "mips"
+    )))]
+    {
+        true
+    }
+}
