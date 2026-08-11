@@ -20,7 +20,7 @@ use crate::defs::GetIPResult;
 use crate::http::{empty_body, HttpClient, IpFamily};
 use crate::ping::{compute_jitter, icmp_rtts, resolve_host};
 use crate::spinner::Spinner;
-use crate::util::{avg, url_join_path};
+use crate::util::{avg, stddev, url_join_path};
 use crate::{write_debug, write_ui};
 
 /// The stagger between starting concurrent transfer streams.
@@ -270,6 +270,32 @@ impl Server {
             );
             return self.ping_and_jitter(client, tlog, count + 2).await;
         }
+
+        // Say which address the test actually reached. IPv4 and IPv6 can take
+        // different paths through the network, so a result is not fully
+        // described by the hostname it was measured against, and --json carries
+        // no client address to infer it from.
+        write_debug!(
+            "Pinging {} over ICMP ({})\n",
+            target,
+            if target.is_ipv4() { "IPv4" } else { "IPv6" }
+        );
+
+        // A single figure hides how the samples were spread, and the spread is
+        // what says whether a link is steady or merely fast on average. Raw
+        // counts rather than a loss percentage: a handful of probes is too few
+        // for a rate, and ICMP is often policed independently of the data path,
+        // so a percentage would say more about the server's ICMP handling than
+        // about the network.
+        write_debug!(
+            "Ping over ICMP: min {:.2} ms, avg {:.2} ms, max {:.2} ms, stddev {:.2} ms, {}/{} replies\n",
+            rtts.iter().copied().fold(f64::INFINITY, f64::min),
+            avg(&rtts),
+            rtts.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+            stddev(&rtts),
+            rtts.len(),
+            count
+        );
 
         tlog.logf(format!("ICMP ping took {}", go_duration(t.elapsed())));
         Ok((avg(&rtts), compute_jitter(&rtts)))

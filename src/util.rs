@@ -73,6 +73,20 @@ pub fn avg(vals: &[f64]) -> f64 {
     vals.iter().sum::<f64>() / vals.len() as f64
 }
 
+/// Returns the population standard deviation of a slice, or 0.0 when empty.
+///
+/// Population rather than sample: these are all the probes that came back, not
+/// a sample drawn from a larger set, which is also what pro-bing reports on the
+/// Go side so the two clients agree.
+pub fn stddev(vals: &[f64]) -> f64 {
+    if vals.is_empty() {
+        return 0.0;
+    }
+    let mean = avg(vals);
+    let variance = vals.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / vals.len() as f64;
+    variance.sqrt()
+}
+
 /// Rounds to two decimal places, matching the Go version's `math.Round(x*100)/100`.
 pub fn round2(v: f64) -> f64 {
     (v * 100.0).round() / 100.0
@@ -81,6 +95,29 @@ pub fn round2(v: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stddev_of_an_empty_slice_is_zero() {
+        assert_eq!(stddev(&[]), 0.0);
+    }
+
+    #[test]
+    fn stddev_of_identical_values_is_zero() {
+        assert_eq!(stddev(&[5.0, 5.0, 5.0]), 0.0);
+    }
+
+    #[test]
+    fn stddev_is_the_population_figure() {
+        // Population sd of 2,4,4,4,5,5,7,9 is exactly 2; the sample sd would be
+        // about 2.138, so this pins which of the two is computed.
+        let vals = [2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0];
+        assert!((stddev(&vals) - 2.0).abs() < 1e-12, "got {}", stddev(&vals));
+    }
+
+    #[test]
+    fn stddev_of_one_value_is_zero() {
+        assert_eq!(stddev(&[42.0]), 0.0);
+    }
 
     #[test]
     fn path_join_matches_go() {

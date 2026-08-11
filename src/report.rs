@@ -118,7 +118,12 @@ pub fn csv_header(delimiter: u8) -> anyhow::Result<String> {
     Ok(String::from_utf8(w.into_inner()?)?)
 }
 
-/// Renders CSV rows without a header, with no trailing newline.
+/// Renders CSV rows without a header, terminated by exactly one newline.
+///
+/// The line endings the writer produced are normalised away first, so the
+/// result is one newline whatever the writer emitted. `--csv-header` ends with
+/// one too, which is what lets the two modes be concatenated into a file a CSV
+/// reader will accept.
 pub fn csv_rows(reports: &[CSVReport], delimiter: u8) -> anyhow::Result<String> {
     let mut w = csv::WriterBuilder::new()
         .delimiter(delimiter)
@@ -130,7 +135,7 @@ pub fn csv_rows(reports: &[CSVReport], delimiter: u8) -> anyhow::Result<String> 
     }
 
     let out = String::from_utf8(w.into_inner()?)?;
-    Ok(out.trim_end_matches(['\n', '\r']).to_string())
+    Ok(format!("{}\n", out.trim_end_matches(['\n', '\r'])))
 }
 
 #[cfg(test)]
@@ -150,7 +155,7 @@ mod tests {
     }
 
     #[test]
-    fn rows_quote_embedded_delimiters_and_omit_trailing_newline() {
+    fn rows_quote_embedded_delimiters_and_end_with_one_newline() {
         let rep = CSVReport {
             timestamp: "2026-08-06T15:41:36.067293+02:00".into(),
             name: "Prague, Czech Republic (CESNET)".into(),
@@ -164,7 +169,7 @@ mod tests {
         let out = csv_rows(&[rep], b',').unwrap();
         assert_eq!(
             out,
-            "2026-08-06T15:41:36.067293+02:00,\"Prague, Czech Republic (CESNET)\",https://speedtest.cesnet.cz,6.36,0.82,228.39,553.97,,"
+            "2026-08-06T15:41:36.067293+02:00,\"Prague, Czech Republic (CESNET)\",https://speedtest.cesnet.cz,6.36,0.82,228.39,553.97,,\n"
         );
     }
 
@@ -185,7 +190,7 @@ mod tests {
         assert!(out.contains(",'-2+3,"));
         // A TAB needs no CSV quoting under a ',' delimiter, so the prefix on
         // its own is what stops the evaluation here.
-        assert!(out.ends_with(",'\t=cmd"));
+        assert!(out.ends_with(",'\t=cmd\n"));
         // A benign value is untouched.
         assert!(!csv_rows(
             &[CSVReport {

@@ -262,7 +262,10 @@ pub async fn do_speed_test(
         }
     } else if cli.json {
         match serde_json::to_string(&reps_json) {
-            Ok(s) => write_out!("{s}"),
+            // serde_json does not terminate its output, and a document that
+            // ends mid-line makes a shell prompt land on top of it and leaves
+            // line-oriented tools with an unterminated last line.
+            Ok(s) => write_out!("{s}\n"),
             Err(e) => write_error!("Error generating JSON report: {e}\n"),
         }
     }

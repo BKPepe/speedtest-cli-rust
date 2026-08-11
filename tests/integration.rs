@@ -181,6 +181,16 @@ fn version_reports_program_name_and_license() {
     let stdout = stdout_of(&out);
     assert!(stdout.starts_with("librespeed-cli v"));
     assert!(stdout.contains("GNU Lesser General Public License v3.0"));
+
+    // The upstream Go client carried a `librespeed.org  Copyright (C)` line
+    // that named neither a holder nor a year, and dropped it. A copyright
+    // notice with no holder claims nothing, so every line here must have one.
+    for line in stdout.lines().filter(|l| l.contains("Copyright (C)")) {
+        assert!(
+            line.trim_end().len() > line.find("Copyright (C)").unwrap() + "Copyright (C)".len(),
+            "copyright line names nobody: {line:?}"
+        );
+    }
 }
 
 #[test]
@@ -266,7 +276,21 @@ fn json_report_has_the_expected_shape() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let reports: serde_json::Value = serde_json::from_str(&stdout_of(&out)).expect("valid JSON");
+    let stdout = stdout_of(&out);
+
+    // serde_json does not terminate its output. A document that ends mid-line
+    // puts the shell prompt on top of it and leaves line-oriented tools with an
+    // unterminated last line, so the trailing newline is part of what this
+    // command promises -- and exactly one of them, so the output stays a single
+    // line that `read` and friends can consume.
+    assert!(stdout.ends_with('\n'), "unterminated output: {stdout:?}");
+    assert!(!stdout.ends_with("\n\n"), "extra blank line: {stdout:?}");
+    assert!(
+        !stdout.trim_end_matches('\n').contains('\n'),
+        "report is not on one line: {stdout:?}"
+    );
+
+    let reports: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
     let report = &reports[0];
 
     assert_eq!(report["server"]["name"], "Mock json");
@@ -309,13 +333,45 @@ fn csv_report_honours_a_custom_delimiter() {
     );
 
     let stdout = stdout_of(&out);
-    // No trailing newline, and the row splits into the nine documented columns.
-    assert!(!stdout.ends_with('\n'));
-    let fields: Vec<&str> = stdout.split(';').collect();
+    // Exactly one trailing newline. `--csv-header` ends with one as well, so
+    // without this the two modes could not be concatenated into a file a CSV
+    // reader will accept -- and the shell prompt would land on the row.
+    assert!(stdout.ends_with('\n'), "unterminated row: {stdout:?}");
+    assert!(!stdout.ends_with("\n\n"), "extra blank line: {stdout:?}");
+
+    // The row splits into the nine documented columns.
+    let fields: Vec<&str> = stdout.trim_end_matches('\n').split(';').collect();
     assert_eq!(fields.len(), 9, "unexpected row: {stdout:?}");
     assert_eq!(fields[1], "Mock csv");
     assert_eq!(fields[2], backend.url());
     assert_eq!(fields[8], "203.0.113.7");
+}
+
+// A header and a body written by consecutive runs have to make one valid file;
+// that is the point of --csv-header existing separately.
+#[test]
+fn csv_header_and_rows_concatenate_into_a_valid_file() {
+    let backend = MockBackend::start();
+    let list = backend.server_list("csvcat");
+
+    let header = run(&["--csv-header"]);
+    let body = run(&[
+        "--local-json",
+        list.to_str().unwrap(),
+        "--server",
+        "1",
+        "--duration",
+        "1",
+        "--no-icmp",
+        "--csv",
+    ]);
+    assert!(header.status.success() && body.status.success());
+
+    let file = format!("{}{}", stdout_of(&header), stdout_of(&body));
+    let lines: Vec<&str> = file.lines().collect();
+    assert_eq!(lines.len(), 2, "not two lines: {file:?}");
+    assert_eq!(lines[0].split(',').count(), lines[1].split(',').count());
+    assert!(file.ends_with('\n'), "unterminated file: {file:?}");
 }
 
 #[test]
