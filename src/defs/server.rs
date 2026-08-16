@@ -341,7 +341,7 @@ impl Server {
         // elapsed time both measure from here, after ramp-up. A ticker that
         // started earlier would run ahead of the test itself.
         let test_start = Instant::now();
-        let ticker = Self::start_progress_ticker("download", &counter, test_start);
+        let ticker = Self::start_progress_ticker("download", &counter, opts.duration, test_start);
         let _ = tokio::time::timeout(opts.duration, refill).await;
         // Abort the in-flight transfers and wait for them to unwind before
         // reading the counter, so the reported total cannot change under us.
@@ -417,7 +417,7 @@ impl Server {
         // elapsed time both measure from here, after ramp-up. A ticker that
         // started earlier would run ahead of the test itself.
         let test_start = Instant::now();
-        let ticker = Self::start_progress_ticker("upload", &counter, test_start);
+        let ticker = Self::start_progress_ticker("upload", &counter, opts.duration, test_start);
         let _ = tokio::time::timeout(opts.duration, refill).await;
         // Abort the in-flight transfers and wait for them to unwind before
         // reading the counter, so the reported total cannot change under us.
@@ -446,6 +446,7 @@ impl Server {
     fn start_progress_ticker(
         phase: &'static str,
         counter: &Arc<BytesCounter>,
+        duration: Duration,
         started: Instant,
     ) -> Option<tokio::task::JoinHandle<()>> {
         if !crate::output::is_stream() {
@@ -455,9 +456,13 @@ impl Server {
         Some(tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(1)).await;
+                let elapsed = started.elapsed().as_secs_f64();
+                // A speed test is bounded by time, not by volume, so percent
+                // done is elapsed over the configured duration -- exact, and
+                // the only notion of "how much is left" the test has.
+                let percent = (elapsed / duration.as_secs_f64() * 100.0).min(100.0);
                 crate::output::stream_event(&format!(
-                    r#"{{"event":"progress","phase":"{phase}","seconds":{:.1},"mbps":{:.2}}}"#,
-                    started.elapsed().as_secs_f64(),
+                    r#"{{"event":"progress","phase":"{phase}","seconds":{elapsed:.1},"mbps":{:.2},"progress":{percent:.0}}}"#,
                     counter.avg_mbps()
                 ));
             }

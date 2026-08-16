@@ -488,6 +488,8 @@ fn json_stream_emits_phases_progress_and_one_result() {
     for p in &progress {
         assert!(p["mbps"].as_f64().is_some(), "mbps missing: {p}");
         assert!(p["seconds"].as_f64().unwrap() > 0.0);
+        let pct = p["progress"].as_f64().expect("progress missing");
+        assert!((0.0..=100.0).contains(&pct), "progress out of range: {pct}");
         assert!(matches!(
             p["phase"].as_str().unwrap(),
             "download" | "upload"
