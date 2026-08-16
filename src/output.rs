@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 static DEBUG: AtomicBool = AtomicBool::new(false);
 static QUIET: AtomicBool = AtomicBool::new(false);
+static STREAM: AtomicBool = AtomicBool::new(false);
 
 /// Enables or disables debug output. Called when --debug is set.
 pub fn set_debug(v: bool) {
@@ -21,6 +22,27 @@ pub fn set_debug(v: bool) {
 /// Called when --csv, --json, or --simple is set.
 pub fn set_quiet(v: bool) {
     QUIET.store(v, Ordering::Relaxed);
+}
+
+/// Enables NDJSON progress events on stdout (--json-stream).
+pub fn set_stream(v: bool) {
+    STREAM.store(v, Ordering::Relaxed);
+}
+
+/// Reports whether NDJSON progress events are enabled.
+pub fn is_stream() -> bool {
+    STREAM.load(Ordering::Relaxed)
+}
+
+/// Emits one NDJSON event line on stdout, when --json-stream is active.
+///
+/// Goes through the same locked, flushed path as write_out!, so an event is
+/// always a whole line: the consumer on the other side is a script reading
+/// line by line, and a torn event would be worse than a missing one.
+pub fn stream_event(json_line: &str) {
+    if is_stream() {
+        _out(format_args!("{json_line}\n"));
+    }
 }
 
 /// Reports whether debug output is enabled.

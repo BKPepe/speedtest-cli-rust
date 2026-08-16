@@ -337,10 +337,18 @@ impl Server {
                 }
             }
         };
+        // One clock for the whole test window: the timeout and the ticker's
+        // elapsed time both measure from here, after ramp-up. A ticker that
+        // started earlier would run ahead of the test itself.
+        let test_start = Instant::now();
+        let ticker = Self::start_progress_ticker("download", &counter, test_start);
         let _ = tokio::time::timeout(opts.duration, refill).await;
         // Abort the in-flight transfers and wait for them to unwind before
         // reading the counter, so the reported total cannot change under us.
         tasks.shutdown().await;
+        if let Some(ticker) = ticker {
+            ticker.abort();
+        }
 
         let (mbps, total) = (counter.avg_mbps(), counter.total());
         if let Some(spinner) = spinner {
@@ -405,10 +413,18 @@ impl Server {
                 }
             }
         };
+        // One clock for the whole test window: the timeout and the ticker's
+        // elapsed time both measure from here, after ramp-up. A ticker that
+        // started earlier would run ahead of the test itself.
+        let test_start = Instant::now();
+        let ticker = Self::start_progress_ticker("upload", &counter, test_start);
         let _ = tokio::time::timeout(opts.duration, refill).await;
         // Abort the in-flight transfers and wait for them to unwind before
         // reading the counter, so the reported total cannot change under us.
         tasks.shutdown().await;
+        if let Some(ticker) = ticker {
+            ticker.abort();
+        }
 
         let (mbps, total) = (counter.avg_mbps(), counter.total());
         if let Some(spinner) = spinner {
@@ -419,6 +435,33 @@ impl Server {
 
         tlog.logf(format!("Upload took {}", go_duration(t.elapsed())));
         Ok((mbps, total))
+    }
+
+    /// Emits one NDJSON progress event a second while a transfer runs.
+    ///
+    /// The machine-readable sibling of the spinner: the spinner narrates to a
+    /// person on stderr, this reports to a script on stdout, and both read the
+    /// same counter. Aborted -- not joined -- when the transfer ends, since a
+    /// sleeping tick holds nothing worth waiting for.
+    fn start_progress_ticker(
+        phase: &'static str,
+        counter: &Arc<BytesCounter>,
+        started: Instant,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        if !crate::output::is_stream() {
+            return None;
+        }
+        let counter = counter.clone();
+        Some(tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                crate::output::stream_event(&format!(
+                    r#"{{"event":"progress","phase":"{phase}","seconds":{:.1},"mbps":{:.2}}}"#,
+                    started.elapsed().as_secs_f64(),
+                    counter.avg_mbps()
+                ));
+            }
+        }))
     }
 
     fn start_transfer_spinner(

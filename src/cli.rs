@@ -84,6 +84,11 @@ pub struct Cli {
     #[arg(long)]
     pub json: bool,
 
+    /// Emit NDJSON progress events on stdout while the test runs, ending
+    /// with an event carrying the same report --json prints
+    #[arg(long = "json-stream", conflicts_with_all = ["json", "csv"])]
+    pub json_stream: bool,
+
     /// Display a list of LibreSpeed.org servers
     #[arg(long)]
     pub list: bool,
@@ -203,7 +208,7 @@ pub struct Cli {
 impl Cli {
     /// True when any output mode that suppresses the interactive UI is active.
     pub fn silent(&self) -> bool {
-        self.simple || self.json || self.csv
+        self.simple || self.json || self.csv || self.json_stream
     }
 
     /// The CSV delimiter as a single byte.

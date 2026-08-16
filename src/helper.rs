@@ -98,6 +98,7 @@ pub async fn do_speed_test(
             Some(Spinner::start("Pinging server...  ", String::new))
         };
 
+        output::stream_event(r#"{"event":"phase","phase":"ping"}"#);
         let ping_result = current_server
             .icmp_ping_and_jitter(
                 ctx.client,
@@ -142,6 +143,7 @@ pub async fn do_speed_test(
             write_ui!("Download test is disabled\n");
             (0.0, 0)
         } else {
+            output::stream_event(r#"{"event":"phase","phase":"download"}"#);
             match current_server.download(ctx.client, &tlog, &opts).await {
                 Ok(v) => v,
                 Err(e) => {
@@ -156,6 +158,7 @@ pub async fn do_speed_test(
             write_ui!("Upload test is disabled\n");
             (0.0, 0)
         } else {
+            output::stream_event(r#"{"event":"phase","phase":"upload"}"#);
             match current_server.upload(ctx.client, &tlog, &opts).await {
                 Ok(v) => v,
                 Err(e) => {
@@ -228,7 +231,7 @@ pub async fn do_speed_test(
                 share: share_link,
                 ip: isp_info.raw_isp_info.ip.clone(),
             });
-        } else if cli.json {
+        } else if cli.json || cli.json_stream {
             let mut ip_info = isp_info.raw_isp_info.clone();
             ip_info.readme = String::new();
 
@@ -259,6 +262,13 @@ pub async fn do_speed_test(
         match report::csv_rows(&reps_csv, delimiter) {
             Ok(s) => write_out!("{s}"),
             Err(e) => write_error!("Error generating CSV report: {e}\n"),
+        }
+    } else if cli.json_stream {
+        // The reports are the same array --json prints, wrapped as the final
+        // event so a consumer needs one parser for the whole stream.
+        match serde_json::to_string(&reps_json) {
+            Ok(s) => output::stream_event(&format!(r#"{{"event":"result","reports":{s}}}"#)),
+            Err(e) => write_error!("Error generating JSON report: {e}\n"),
         }
     } else if cli.json {
         match serde_json::to_string(&reps_json) {

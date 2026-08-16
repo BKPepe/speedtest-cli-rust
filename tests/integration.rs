@@ -440,6 +440,83 @@ fn no_download_and_no_upload_skip_their_tests() {
     assert_eq!(reports[0]["bytes_sent"], 0);
 }
 
+// The stream is NDJSON on stdout: phase and progress events while the test
+// runs, and one final event carrying the same reports --json prints. One
+// parser handles the whole stream, which is the point of the format.
+#[test]
+fn json_stream_emits_phases_progress_and_one_result() {
+    let backend = MockBackend::start();
+    let list = backend.server_list("stream");
+
+    let out = run(&[
+        "--local-json",
+        list.to_str().unwrap(),
+        "--server",
+        "1",
+        "--duration",
+        "2",
+        "--no-icmp",
+        "--json-stream",
+    ]);
+    assert!(
+        out.status.success(),
+        "stderr: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stdout = stdout_of(&out);
+    let events: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("every line is valid JSON"))
+        .collect();
+
+    let names: Vec<&str> = events
+        .iter()
+        .map(|e| e["event"].as_str().expect("event field"))
+        .collect();
+
+    let phases: Vec<&str> = events
+        .iter()
+        .filter(|e| e["event"] == "phase")
+        .map(|e| e["phase"].as_str().unwrap())
+        .collect();
+    assert_eq!(phases, ["ping", "download", "upload"], "phase order");
+
+    let progress: Vec<&serde_json::Value> =
+        events.iter().filter(|e| e["event"] == "progress").collect();
+    assert!(!progress.is_empty(), "no progress events in: {stdout}");
+    for p in &progress {
+        assert!(p["mbps"].as_f64().is_some(), "mbps missing: {p}");
+        assert!(p["seconds"].as_f64().unwrap() > 0.0);
+        assert!(matches!(
+            p["phase"].as_str().unwrap(),
+            "download" | "upload"
+        ));
+    }
+
+    assert_eq!(
+        names.iter().filter(|n| **n == "result").count(),
+        1,
+        "exactly one result event"
+    );
+    assert_eq!(names.last(), Some(&"result"), "result is the last event");
+
+    let report = &events.last().unwrap()["reports"][0];
+    assert_eq!(report["server"]["name"], "Mock stream");
+    assert!(report["download"].as_f64().unwrap() > 0.0);
+}
+
+#[test]
+fn json_stream_conflicts_with_json_and_csv() {
+    for other in ["--json", "--csv"] {
+        let out = run(&["--json-stream", other]);
+        assert!(
+            !out.status.success(),
+            "--json-stream with {other} must be rejected"
+        );
+    }
+}
+
 #[test]
 fn unknown_server_id_fails_cleanly() {
     let backend = MockBackend::start();

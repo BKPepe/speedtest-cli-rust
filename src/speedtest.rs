@@ -47,6 +47,9 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
     if cli.debug {
         output::set_debug(true);
     }
+    if cli.json_stream {
+        output::set_stream(true);
+    }
 
     if cli.version {
         print_version();
