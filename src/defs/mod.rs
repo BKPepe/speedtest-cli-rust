@@ -51,42 +51,42 @@ pub fn user_agent() -> String {
 pub struct GetIPResult {
     #[serde(rename = "processedString", default)]
     pub processed_string: String,
-    // A backend with ISP detection disabled answers with an empty string here
-    // rather than an object, so the field cannot be deserialised as the struct
-    // alone -- doing so rejects the whole document and loses processedString
-    // with it.
-    #[serde(rename = "rawIspInfo", default, deserialize_with = "raw_isp_info")]
-    pub raw_isp_info: IPInfoResponse,
+    // Kept verbatim rather than typed: a backend with ISP detection disabled
+    // answers with an empty string here rather than an object, so a typed
+    // field would reject the whole document and lose processedString with it.
+    // Telemetry also sends this document back, and it should report what the
+    // backend originally said, not this client's re-encoding of it. The typed
+    // view is available through ip_info().
+    #[serde(rename = "rawIspInfo", default)]
+    pub raw_isp_info: serde_json::Value,
 }
 
-/// Accepts unavailable or malformed ISP information without rejecting the rest
-/// of an otherwise usable response.
-///
-/// A backend with ISP detection disabled sends an empty string here rather than
-/// an object. Rejecting the document over it would throw away processedString
-/// as well, which is the part actually shown to the user, so ISP information
-/// that cannot be read is reported as absent -- which is also what the Go
-/// client settles on after its own fallback.
-///
-/// This is deliberately broad, and it is worth being clear about the cost: a
-/// backend that started sending something unexpected here would be tolerated
-/// silently rather than reported. That trade is made because this field is
-/// supplementary, while processedString is not.
-fn raw_isp_info<'de, D>(d: D) -> Result<IPInfoResponse, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum Raw {
-        Info(Box<IPInfoResponse>),
-        Unreadable(serde::de::IgnoredAny),
+impl GetIPResult {
+    /// The typed view of rawIspInfo. Anything that is not an object -- an
+    /// empty string, null, or an absent field -- reads as no ISP information,
+    /// which is also what the Go client settles on.
+    pub fn ip_info(&self) -> IPInfoResponse {
+        serde_json::from_value(self.raw_isp_info.clone()).unwrap_or_default()
     }
 
-    Ok(match Raw::deserialize(d)? {
-        Raw::Info(info) => *info,
-        Raw::Unreadable(_) => IPInfoResponse::default(),
-    })
+    /// The client address this measurement was made from.
+    ///
+    /// Taken from rawIspInfo when present, but a backend with ISP detection
+    /// disabled puts the address only in processedString -- bare, or as the
+    /// leading token of `<address> - <ISP>` -- so the first token stands in
+    /// when it parses as an address. The report carries this field, and it is
+    /// what lets a consumer tell an IPv4 measurement from an IPv6 one.
+    pub fn ip(&self) -> String {
+        let from_raw = self.ip_info().ip;
+        if !from_raw.is_empty() {
+            return from_raw;
+        }
+
+        match self.processed_string.split_whitespace().next() {
+            Some(tok) if tok.parse::<std::net::IpAddr>().is_ok() => tok.to_string(),
+            _ => String::new(),
+        }
+    }
 }
 
 /// The JSON returned by IPInfo.io's API.
@@ -171,7 +171,56 @@ mod tests {
     fn get_ip_result_still_reads_a_real_object() {
         let json = r#"{"processedString":"x","rawIspInfo":{"ip":"192.0.2.1","country":"CZ"}}"#;
         let parsed: GetIPResult = serde_json::from_str(json).expect("should parse");
-        assert_eq!(parsed.raw_isp_info.ip, "192.0.2.1");
-        assert_eq!(parsed.raw_isp_info.country, "CZ");
+        assert_eq!(parsed.ip_info().ip, "192.0.2.1");
+        assert_eq!(parsed.ip_info().country, "CZ");
+        assert_eq!(parsed.ip(), "192.0.2.1");
+    }
+
+    // The address lives only in processedString whenever rawIspInfo carries
+    // none: live backends answer with an empty string, a JSON null, or -- with
+    // the current ipinfo schema -- an object that has no ip field at all.
+    #[test]
+    fn client_address_recovered_from_processed_string() {
+        for raw in [
+            r#""""#,
+            "null",
+            r#"{"as_name":"O2 Czech Republic, a.s.","asn":"AS5610"}"#,
+        ] {
+            for (processed, want) in [
+                (
+                    "2a00:1028:8388:a84e:8cda:7223:57f8:67a6",
+                    "2a00:1028:8388:a84e:8cda:7223:57f8:67a6",
+                ),
+                ("192.0.2.1 - Example ISP, CZ", "192.0.2.1"),
+                ("no address here", ""),
+                ("", ""),
+            ] {
+                let json = format!(r#"{{"processedString":"{processed}","rawIspInfo":{raw}}}"#);
+                let parsed: GetIPResult = serde_json::from_str(&json).expect("should parse");
+                assert_eq!(parsed.ip(), want, "for {processed:?} with raw {raw}");
+            }
+        }
+    }
+
+    // rawIspInfo.ip wins over whatever processedString starts with: the typed
+    // field is the backend's own answer, the token is only a stand-in.
+    #[test]
+    fn raw_address_takes_precedence_over_processed_string() {
+        let json = r#"{"processedString":"198.51.100.7 - X","rawIspInfo":{"ip":"192.0.2.1"}}"#;
+        let parsed: GetIPResult = serde_json::from_str(json).expect("should parse");
+        assert_eq!(parsed.ip(), "192.0.2.1");
+    }
+
+    // Telemetry sends the getIP document back to the server; what the backend
+    // said must survive the round trip unchanged, not come back re-typed.
+    #[test]
+    fn raw_isp_info_round_trips_verbatim() {
+        for raw in [r#""""#, "null", r#"{"ip":"192.0.2.1"}"#, r#""unavailable""#] {
+            let json = format!(r#"{{"processedString":"x","rawIspInfo":{raw}}}"#);
+            let parsed: GetIPResult = serde_json::from_str(&json).expect("should parse");
+            let back = serde_json::to_value(&parsed).expect("should serialize");
+            let orig: serde_json::Value = serde_json::from_str(&json).expect("valid");
+            assert_eq!(back["rawIspInfo"], orig["rawIspInfo"], "for {raw}");
+        }
     }
 }

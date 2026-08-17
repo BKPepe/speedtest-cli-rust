@@ -171,19 +171,11 @@ impl Server {
                     crate::output::sanitize(&String::from_utf8_lossy(&body))
                 );
 
-                // Try to salvage processedString even if the full parse fails,
-                // e.g. when rawIspInfo is "" rather than an object.
-                #[derive(Deserialize)]
-                struct Partial {
-                    #[serde(rename = "processedString", default)]
-                    processed_string: String,
-                }
-                match serde_json::from_slice::<Partial>(&body) {
-                    Ok(p) if !p.processed_string.is_empty() => {
-                        info.processed_string = p.processed_string
-                    }
-                    _ => info.processed_string = String::from_utf8_lossy(&body).into_owned(),
-                }
+                // Reached when the body is not JSON at all, or is JSON that
+                // does not fit the schema -- a non-string processedString,
+                // say. Either way the raw body shown as the processed string
+                // beats losing everything.
+                info.processed_string = String::from_utf8_lossy(&body).into_owned();
             }
         }
 

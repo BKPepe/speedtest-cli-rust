@@ -229,11 +229,12 @@ pub async fn do_speed_test(
                 download: round2(download_value),
                 upload: round2(upload_value),
                 share: share_link,
-                ip: isp_info.raw_isp_info.ip.clone(),
+                ip: isp_info.ip(),
             });
         } else if cli.json || cli.json_stream {
-            let mut ip_info = isp_info.raw_isp_info.clone();
+            let mut ip_info = isp_info.ip_info();
             ip_info.readme = String::new();
+            ip_info.ip = isp_info.ip();
 
             reps_json.push(JSONReport {
                 timestamp: report::timestamp_now(),

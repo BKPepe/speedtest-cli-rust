@@ -350,8 +350,21 @@ async fn load_servers(
             match fetch_server_list(client, server_url).await {
                 Ok(b) => b,
                 Err(_) => {
+                    // The discovery endpoint lives at the site root; appending
+                    // it to the full list URL would ask for
+                    // .../servers.php/.well-known/librespeed, which can never
+                    // answer. Build the retry from the origin instead.
+                    let retry = url::Url::parse(server_url)
+                        .map(|u| {
+                            format!(
+                                "{}/.well-known/librespeed",
+                                u.origin().ascii_serialization()
+                            )
+                        })
+                        .unwrap_or_else(|_| format!("{server_url}/.well-known/librespeed"));
+
                     write_ui!("Retry with /.well-known/librespeed\n");
-                    fetch_server_list(client, &format!("{server_url}/.well-known/librespeed"))
+                    fetch_server_list(client, &retry)
                         .await
                         .context("Error when fetching server list")?
                 }
