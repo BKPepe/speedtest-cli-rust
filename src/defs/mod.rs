@@ -66,7 +66,25 @@ impl GetIPResult {
     /// empty string, null, or an absent field -- reads as no ISP information,
     /// which is also what the Go client settles on.
     pub fn ip_info(&self) -> IPInfoResponse {
-        serde_json::from_value(self.raw_isp_info.clone()).unwrap_or_default()
+        // as_name is an input alias for org, not a report field: it is read
+        // here and never serialized back out.
+        #[derive(Deserialize, Default)]
+        struct Raw {
+            #[serde(flatten)]
+            info: IPInfoResponse,
+            #[serde(rename = "as_name", default)]
+            as_name: String,
+        }
+
+        let raw: Raw = serde_json::from_value(self.raw_isp_info.clone()).unwrap_or_default();
+        let mut info = raw.info;
+
+        // Current backends use as_name, while older ones use org.
+        if info.organization.is_empty() {
+            info.organization = raw.as_name;
+        }
+
+        info
     }
 
     /// The client address this measurement was made from.
@@ -199,6 +217,42 @@ mod tests {
                 let parsed: GetIPResult = serde_json::from_str(&json).expect("should parse");
                 assert_eq!(parsed.ip(), want, "for {processed:?} with raw {raw}");
             }
+        }
+    }
+
+    // as_name is an input alias for org, not a report field: accepting it
+    // must not start emitting it.
+    #[test]
+    fn ip_info_does_not_leak_as_name() {
+        let json = r#"{"processedString":"x","rawIspInfo":{"as_name":"O2 Czech Republic, a.s."}}"#;
+        let parsed: GetIPResult = serde_json::from_str(json).expect("should parse");
+        let out = serde_json::to_string(&parsed.ip_info()).expect("serialize");
+        assert!(!out.contains("as_name"), "leaked: {out}");
+        assert!(
+            out.contains(r#""org":"O2 Czech Republic, a.s.""#),
+            "org missing: {out}"
+        );
+    }
+
+    // org takes precedence over as_name; a backend sending only the current
+    // ipinfo schema still yields a filled organisation.
+    #[test]
+    fn organisation_recovered_from_as_name() {
+        for (raw, want) in [
+            (
+                r#"{"ip":"192.0.2.1","org":"AS64496 Example"}"#,
+                "AS64496 Example",
+            ),
+            (
+                r#"{"as_name":"O2 Czech Republic, a.s.","asn":"AS5610"}"#,
+                "O2 Czech Republic, a.s.",
+            ),
+            (r#"{"org":"Old Name","as_name":"New Name"}"#, "Old Name"),
+            (r#"{"ip":"192.0.2.1"}"#, ""),
+        ] {
+            let json = format!(r#"{{"processedString":"x","rawIspInfo":{raw}}}"#);
+            let parsed: GetIPResult = serde_json::from_str(&json).expect("should parse");
+            assert_eq!(parsed.ip_info().organization, want, "for {raw}");
         }
     }
 
