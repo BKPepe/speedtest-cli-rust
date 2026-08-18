@@ -29,21 +29,44 @@ pub const BUILD_DATE: &str = env!("LIBRESPEED_BUILD_DATE");
 /// The source revision, filled in by `build.rs`.
 pub const REVISION: &str = env!("LIBRESPEED_REVISION");
 
-/// The User-Agent sent with every request.
-///
-/// The platform is named as well as the program, the way a browser does. A
-/// server's telemetry stores this header already, so reporting the operating
-/// system and architecture is what lets an operator tell which kinds of machine
-/// are measuring against them without changing what the client sends.
-///
-/// It stays coarse on purpose: the kernel version or the hostname would
-/// identify the machine rather than describe it.
+/// The User-Agent: the program, its version, the platform, and on Linux the
+/// distribution ID. The Go client sends the same shape.
 pub fn user_agent() -> String {
-    format!(
-        "{UA_NAME}/{PROG_VERSION} ({}; {})",
-        std::env::consts::OS,
-        std::env::consts::ARCH
-    )
+    let mut platform = format!("{}; {}", std::env::consts::OS, std::env::consts::ARCH);
+
+    if let Some(id) = distribution_id() {
+        platform.push_str("; ");
+        platform.push_str(&id);
+    }
+
+    format!("{UA_NAME}/{PROG_VERSION} ({platform})")
+}
+
+/// The ID from os-release, e.g. `openwrt`, or `None` where neither of its two
+/// standard locations exists.
+fn distribution_id() -> Option<String> {
+    let content = std::fs::read_to_string("/etc/os-release")
+        .or_else(|_| std::fs::read_to_string("/usr/lib/os-release"))
+        .ok()?;
+    parse_os_release_id(&content)
+}
+
+/// Extracts `ID` from os-release content, sanitised and capped: it ends up in
+/// a header built from a root-writable file.
+fn parse_os_release_id(content: &str) -> Option<String> {
+    content.lines().find_map(|line| {
+        let bare = line.strip_prefix("ID")?.strip_prefix('=')?;
+        let clean: String = bare
+            .trim()
+            .trim_matches('"')
+            .trim_matches('\'')
+            .to_ascii_lowercase()
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+            .take(24)
+            .collect();
+        (!clean.is_empty()).then_some(clean)
+    })
 }
 
 /// The JSON returned by a backend server's `getIP.php` endpoint.
@@ -162,6 +185,33 @@ mod tests {
             "got {}",
             user_agent()
         );
+    }
+
+    #[test]
+    fn distribution_id_read_from_os_release() {
+        for (content, want) in [
+            ("ID=\"openwrt\"\nVERSION_ID=\"24.10.1\"\n", Some("openwrt")),
+            ("ID=debian\nVERSION_ID=12\n", Some("debian")),
+            // ID_LIKE and VERSION_ID must not be mistaken for ID.
+            ("ID_LIKE=debian\nID=ubuntu\n", Some("ubuntu")),
+            ("VERSION_ID=1.0\n", None),
+            ("", None),
+            ("ID=\"???\"\n", None),
+            ("ID='OpenWrt!'\n", Some("openwrt")),
+        ] {
+            assert_eq!(
+                parse_os_release_id(content).as_deref(),
+                want,
+                "for {content:?}"
+            );
+        }
+    }
+
+    // The value lands in an HTTP header and comes from a root-writable file.
+    #[test]
+    fn distribution_id_is_bounded() {
+        let long = "ID=".to_string() + &"a".repeat(200) + "\n";
+        assert_eq!(parse_os_release_id(&long).map(|s| s.len()), Some(24));
     }
 
     // A backend with ISP detection disabled answers with an empty string here
