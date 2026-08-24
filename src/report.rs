@@ -67,6 +67,20 @@ pub struct JSONReport {
     #[serde(serialize_with = "go_float")]
     pub download: f64,
     pub share: String,
+    /// What the connection negotiated, absent over plain HTTP -- and on the
+    /// native-tls backend, which exposes no way to read it. On hardware
+    /// without AES acceleration the cipher, not the line, can bound the
+    /// result, and under TLS 1.3 the server picks it: this is the field
+    /// that explains such a number.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tls: Option<TLSReport>,
+}
+
+/// The negotiated TLS parameters a measurement ran over.
+#[derive(Debug, Serialize)]
+pub struct TLSReport {
+    pub version: String,
+    pub cipher: String,
 }
 
 /// The output data fields of a CSV report.
@@ -141,6 +155,29 @@ pub fn csv_rows(reports: &[CSVReport], delimiter: u8) -> anyhow::Result<String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Absent over plain HTTP, an object over TLS: the report shape both
+    /// clients agree on.
+    #[test]
+    fn tls_is_omitted_when_absent() {
+        let plain = serde_json::to_string(&JSONReport::default()).unwrap();
+        assert!(!plain.contains("\"tls\""), "tls leaked into {plain}");
+
+        let secured = serde_json::to_string(&JSONReport {
+            tls: Some(TLSReport {
+                version: "TLS 1.3".into(),
+                cipher: "TLS_CHACHA20_POLY1305_SHA256".into(),
+            }),
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(
+            secured.contains(
+                "\"tls\":{\"version\":\"TLS 1.3\",\"cipher\":\"TLS_CHACHA20_POLY1305_SHA256\"}"
+            ),
+            "unexpected shape: {secured}"
+        );
+    }
 
     #[test]
     fn header_uses_the_configured_delimiter() {

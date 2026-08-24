@@ -10,7 +10,7 @@ use url::Url;
 use crate::cli::Cli;
 use crate::defs::server::TransferOptions;
 use crate::defs::{GetIPResult, Server, TelemetryExtra, TelemetryLog, TelemetryServer};
-use crate::http::{HttpClient, IpFamily};
+use crate::http::{HttpClient, IpFamily, TlsSettings};
 use crate::report::{self, CSVReport, Client, JSONReport, ReportServer};
 use crate::spinner::Spinner;
 use crate::util::round2;
@@ -236,6 +236,30 @@ pub async fn do_speed_test(
             ip_info.readme = String::new();
             ip_info.ip = isp_info.ip();
 
+            // The negotiated TLS parameters, read with one extra handshake
+            // using the same configuration the transfers used: hyper's pool
+            // does not expose theirs. Only meaningful over https.
+            let tls_info = if url.scheme() == "https" {
+                match url.host_str() {
+                    Some(host) => {
+                        crate::http::probe_tls(
+                            host,
+                            url.port_or_known_default().unwrap_or(443),
+                            ctx.family,
+                            &TlsSettings {
+                                ca_cert: cli.ca_cert.as_deref(),
+                                skip_verify: cli.skip_cert_verify,
+                                http2: cli.http2,
+                            },
+                        )
+                        .await
+                    }
+                    None => None,
+                }
+            } else {
+                None
+            };
+
             reps_json.push(JSONReport {
                 timestamp: report::timestamp_now(),
                 server: ReportServer {
@@ -250,6 +274,10 @@ pub async fn do_speed_test(
                 upload: round2(upload_value),
                 download: round2(download_value),
                 share: share_link,
+                tls: tls_info.map(|t| report::TLSReport {
+                    version: t.version,
+                    cipher: t.cipher,
+                }),
             });
         }
 

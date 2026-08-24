@@ -12,6 +12,15 @@
 
 use crate::http::connector::{BindOptions, BoundConnector};
 
+/// What a TLS connection to the chosen server actually negotiated, named the
+/// way Go's `tls.VersionName` and `tls.CipherSuiteName` name it, so the two
+/// clients' reports read the same.
+#[derive(Debug, Clone)]
+pub struct NegotiatedTls {
+    pub version: String,
+    pub cipher: String,
+}
+
 /// TLS trust configuration.
 pub struct TlsSettings<'a> {
     /// PEM bundle replacing the system trust store (`--ca-cert`).
@@ -150,6 +159,57 @@ mod imp {
             .with_no_client_auth())
     }
 
+    /// One handshake with the measurement client's own TLS configuration,
+    /// made to read what it negotiates: hyper's pool does not expose the
+    /// connection state of the transfers themselves. Same config, same
+    /// server -- the answer is the same.
+    pub async fn probe(
+        host: &str,
+        port: u16,
+        family: crate::http::connector::IpFamily,
+        tls: &TlsSettings<'_>,
+    ) -> Option<super::NegotiatedTls> {
+        use tokio::io::AsyncWriteExt as _;
+
+        let config = client_config(tls).ok()?;
+        let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
+        let name = rustls_pki_types::ServerName::try_from(host.to_owned()).ok()?;
+
+        let addrs = crate::http::connector::resolve(host, port, family)
+            .await
+            .ok()?;
+        let tcp = tokio::net::TcpStream::connect(addrs.first()?).await.ok()?;
+        let mut stream = connector.connect(name, tcp).await.ok()?;
+
+        let (_, conn) = stream.get_ref();
+        let version = conn.protocol_version().map(go_version_name)?;
+        let cipher = conn
+            .negotiated_cipher_suite()
+            .map(|s| go_cipher_name(s.suite()))?;
+        let _ = stream.shutdown().await;
+
+        Some(super::NegotiatedTls { version, cipher })
+    }
+
+    /// `TLSv1_3` the way Go says it: `TLS 1.3`.
+    fn go_version_name(v: rustls::ProtocolVersion) -> String {
+        match v {
+            rustls::ProtocolVersion::TLSv1_2 => "TLS 1.2".into(),
+            rustls::ProtocolVersion::TLSv1_3 => "TLS 1.3".into(),
+            other => format!("{other:?}"),
+        }
+    }
+
+    /// rustls names TLS 1.3 suites `TLS13_...` where the IANA registry --
+    /// and Go -- say `TLS_...`; 1.2 suites match already.
+    fn go_cipher_name(c: rustls::CipherSuite) -> String {
+        let name = format!("{c:?}");
+        match name.strip_prefix("TLS13_") {
+            Some(rest) => format!("TLS_{rest}"),
+            None => name,
+        }
+    }
+
     pub fn build(bind: BindOptions, tls: &TlsSettings<'_>) -> anyhow::Result<Connector> {
         let builder = hyper_rustls::HttpsConnectorBuilder::new()
             .with_tls_config(client_config(tls)?)
@@ -175,6 +235,18 @@ mod imp {
     use super::{split_pem, BindOptions, BoundConnector, TlsSettings};
 
     pub type Connector = hyper_tls::HttpsConnector<BoundConnector>;
+
+    /// native-tls exposes no negotiated-parameter accessors, by design --
+    /// it papers over three system TLS stacks. The report omits the tls
+    /// object on this backend.
+    pub async fn probe(
+        _host: &str,
+        _port: u16,
+        _family: crate::http::connector::IpFamily,
+        _tls: &TlsSettings<'_>,
+    ) -> Option<super::NegotiatedTls> {
+        None
+    }
 
     pub fn build(bind: BindOptions, tls: &TlsSettings<'_>) -> anyhow::Result<Connector> {
         let mut builder = native_tls::TlsConnector::builder();
@@ -216,4 +288,4 @@ mod imp {
 #[cfg(not(any(feature = "rustls-tls", feature = "native-tls")))]
 compile_error!("enable exactly one TLS backend: `rustls-tls` (default) or `native-tls`");
 
-pub use imp::{build, Connector};
+pub use imp::{build, probe, Connector};

@@ -19,7 +19,7 @@ use hyper_util::rt::TokioExecutor;
 use url::Url;
 
 pub use connector::{BindOptions, IpFamily};
-pub use tls::TlsSettings;
+pub use tls::{probe as probe_tls, NegotiatedTls, TlsSettings};
 
 /// Go's `http.Client` follows at most 10 redirects by default.
 const MAX_REDIRECTS: usize = 10;
