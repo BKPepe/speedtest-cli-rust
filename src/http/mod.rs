@@ -156,8 +156,26 @@ impl HttpClient {
     }
 
     /// The configured per-request timeout (`--timeout`).
+    ///
+    /// Zero means none, as it does in the Go client, which is what a slow link
+    /// needs when the transfer legitimately outlasts any sensible limit.
     pub fn timeout(&self) -> Duration {
         self.timeout
+    }
+
+    /// Runs a request under the configured timeout, or without one when it is
+    /// zero.
+    async fn with_timeout<T>(
+        &self,
+        fut: impl std::future::Future<Output = anyhow::Result<T>>,
+    ) -> anyhow::Result<T> {
+        if self.timeout.is_zero() {
+            return fut.await;
+        }
+
+        tokio::time::timeout(self.timeout, fut)
+            .await
+            .map_err(|_| anyhow::anyhow!("request timed out after {:?}", self.timeout))?
     }
 
     /// Issues a request, following redirects the way Go's `http.Client` does.
@@ -186,6 +204,13 @@ impl HttpClient {
             let mut builder = Request::builder().method(method.clone()).uri(uri);
             builder = builder.header(USER_AGENT, self.user_agent.clone());
             for (name, value) in headers {
+                // A redirect that turned a POST into a GET leaves no body, so
+                // the headers describing one would be describing nothing. Go
+                // strips them for the same reason, and a strict server or a
+                // WAF can refuse a GET that claims a content type.
+                if method == Method::GET && name == CONTENT_TYPE {
+                    continue;
+                }
                 builder = builder.header(name.clone(), value.clone());
             }
 
@@ -257,9 +282,7 @@ impl HttpClient {
             Ok::<_, anyhow::Error>((status, body))
         };
 
-        tokio::time::timeout(self.timeout, fut)
-            .await
-            .map_err(|_| anyhow::anyhow!("request timed out after {:?}", self.timeout))?
+        self.with_timeout(fut).await
     }
 
     /// Fetches a URL and discards the body, returning the status.
@@ -275,9 +298,7 @@ impl HttpClient {
             Ok::<_, anyhow::Error>(status)
         };
 
-        tokio::time::timeout(self.timeout, fut)
-            .await
-            .map_err(|_| anyhow::anyhow!("request timed out after {:?}", self.timeout))?
+        self.with_timeout(fut).await
     }
 
     /// Fetches a URL, keeping only the opening of the body.
@@ -292,9 +313,7 @@ impl HttpClient {
             Ok::<_, anyhow::Error>((status, body))
         };
 
-        tokio::time::timeout(self.timeout, fut)
-            .await
-            .map_err(|_| anyhow::anyhow!("request timed out after {:?}", self.timeout))?
+        self.with_timeout(fut).await
     }
 
     /// Posts a body and reads the whole response, used for telemetry.
@@ -314,9 +333,7 @@ impl HttpClient {
             Ok::<_, anyhow::Error>((status, out))
         };
 
-        tokio::time::timeout(self.timeout, fut)
-            .await
-            .map_err(|_| anyhow::anyhow!("request timed out after {:?}", self.timeout))?
+        self.with_timeout(fut).await
     }
 
     /// Sends a request without buffering the response body, for the transfer tests.

@@ -531,34 +531,52 @@ fn unknown_server_id_fails_cleanly() {
 
 #[test]
 fn out_of_range_numeric_options_are_rejected() {
-    // Clap exits 2 for a usage error. Before these were bounded, a negative
-    // value wrapped into a huge unsigned one: --upload-size=-1 aborted the
-    // process with a capacity overflow and --duration=-1 ran effectively
-    // forever.
+    // A usage error exits 1, the way every failure in the Go client does.
+    // Only the lower bounds are enforced: before they existed a negative value
+    // wrapped into a huge unsigned one, so --upload-size=-1 aborted the process
+    // with a capacity overflow and --duration=-1 ran effectively forever.
     for arg in [
         "--concurrent=0",
-        "--concurrent=65",
         "--duration=-1",
         "--duration=0",
         "--chunks=-1",
         "--upload-size=-1",
         "--upload-size=0",
-        "--timeout=0",
     ] {
         let out = run(&[arg, "--list"]);
-        assert_eq!(out.status.code(), Some(2), "{arg} was accepted");
+        assert_eq!(out.status.code(), Some(1), "{arg} was accepted");
+    }
+}
+
+#[test]
+fn command_lines_the_go_client_accepts_are_not_rejected() {
+    // The upper bounds were this port's own invention: a high --concurrent is
+    // how a high bandwidth-delay link gets filled, and --timeout 0 means no
+    // timeout, which is what a slow link needs.
+    for args in [
+        vec!["--concurrent=100"],
+        vec!["--timeout=0"],
+        vec!["--ipv4", "--ipv6"],
+        vec!["--secure", "--insecure"],
+        vec!["--upload-size=70000"],
+        vec!["--duration=4000"],
+        vec!["--chunks=200000"],
+    ] {
+        let mut argv = args.clone();
+        argv.push("--help");
+        let out = run(&argv);
+        assert_eq!(out.status.code(), Some(0), "{args:?} was rejected");
     }
 }
 
 #[test]
 fn mutually_exclusive_options_are_rejected() {
     for args in [
-        vec!["--ipv4", "--ipv6"],
-        vec!["--secure", "--insecure"],
+        vec!["--json", "--json-stream"],
         vec!["--server", "1", "--exclude", "2"],
     ] {
         let out = run(&args);
-        assert_eq!(out.status.code(), Some(2), "{args:?} was accepted");
+        assert_eq!(out.status.code(), Some(1), "{args:?} was accepted");
         assert!(String::from_utf8_lossy(&out.stderr).contains("cannot be used with"));
     }
 }
