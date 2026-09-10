@@ -286,13 +286,19 @@ pub async fn do_speed_test(
         if cli.csv {
             reps_csv.push(CSVReport {
                 timestamp: report::timestamp_now(),
-                name: current_server.name.clone(),
-                address: current_server.server.clone(),
+                // The server list is fetched from a URL the user can point
+                // anywhere, and its entries name further hosts, so these three
+                // are attacker-chosen text. The csv writer quotes a delimiter
+                // and the report defuses a leading formula trigger, but
+                // neither stops an escape sequence from driving the terminal
+                // of whoever cats the file.
+                name: output::sanitize(&current_server.name),
+                address: output::sanitize(&current_server.server),
                 ping: round2(ping),
                 jitter: round2(jitter),
                 download: round2(download_value),
                 upload: round2(upload_value),
-                share: share_link,
+                share: output::sanitize(&share_link),
                 ip: isp_info.ip(),
             });
         } else if cli.json || cli.json_stream {

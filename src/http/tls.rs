@@ -10,7 +10,7 @@
 //! cargo build --release --no-default-features --features native-tls
 //! ```
 
-use crate::http::connector::{BindOptions, BoundConnector};
+use crate::http::connector::{BindOptions, BoundConnector, WriteMeter};
 
 /// What a connection's TLS handshake settled on.
 ///
@@ -36,7 +36,7 @@ pub struct TlsSettings<'a> {
 }
 
 /// Splits a PEM bundle into its individual certificates.
-#[cfg(feature = "native-tls")]
+#[cfg(all(feature = "native-tls", not(feature = "rustls-tls")))]
 fn split_pem(pem: &[u8]) -> Vec<Vec<u8>> {
     const BEGIN: &str = "-----BEGIN CERTIFICATE-----";
     const END: &str = "-----END CERTIFICATE-----";
@@ -62,7 +62,7 @@ mod imp {
 
     use anyhow::{bail, Context as _};
 
-    use super::{BindOptions, BoundConnector, TlsSettings};
+    use super::{BindOptions, BoundConnector, TlsSettings, WriteMeter};
 
     use std::future::Future;
     use std::pin::Pin;
@@ -249,11 +249,38 @@ mod imp {
         }
     }
 
+    /// Reads and parses a `--ca-cert` bundle, failing the run if it is
+    /// unreadable or holds no certificate, as the Go client does.
+    fn read_ca_bundle(
+        path: &std::path::Path,
+    ) -> anyhow::Result<Vec<rustls_pki_types::CertificateDer<'static>>> {
+        use rustls_pki_types::pem::PemObject as _;
+
+        let pem = std::fs::read(path)
+            .with_context(|| format!("cannot read CA certificate bundle {}", path.display()))?;
+        let certs = rustls_pki_types::CertificateDer::pem_slice_iter(&pem)
+            .collect::<Result<Vec<_>, _>>()?;
+        if certs.is_empty() {
+            bail!("no certificates found in {}", path.display());
+        }
+        Ok(certs)
+    }
+
     fn client_config(tls: &TlsSettings<'_>) -> anyhow::Result<rustls::ClientConfig> {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
 
         // ALPN is left untouched: hyper-rustls sets it from `enable_http1()`.
         if tls.skip_verify {
+            // Say so rather than ignoring the bundle in silence: a run that
+            // named a CA file and verified nothing looks like a run that
+            // verified against that file.
+            if let Some(path) = tls.ca_cert {
+                read_ca_bundle(path)?;
+                crate::write_error!(
+                    "--skip-cert-verify overrides --ca-cert: {} is not used\n",
+                    path.display()
+                );
+            }
             return Ok(
                 rustls::ClientConfig::builder_with_provider(provider.clone())
                     .with_safe_default_protocol_versions()?
@@ -267,16 +294,8 @@ mod imp {
         match tls.ca_cert {
             // `--ca-cert` replaces the system trust store, as it does in the Go version.
             Some(path) => {
-                use rustls_pki_types::pem::PemObject as _;
-
-                let pem = std::fs::read(path).with_context(|| {
-                    format!("cannot read CA certificate bundle {}", path.display())
-                })?;
-                for cert in rustls_pki_types::CertificateDer::pem_slice_iter(&pem) {
-                    roots.add(cert?)?;
-                }
-                if roots.is_empty() {
-                    bail!("no certificates found in {}", path.display());
+                for cert in read_ca_bundle(path)? {
+                    roots.add(cert)?;
                 }
             }
             None => {
@@ -297,7 +316,11 @@ mod imp {
             .with_no_client_auth())
     }
 
-    pub fn build(bind: BindOptions, tls: &TlsSettings<'_>) -> anyhow::Result<Connector> {
+    pub fn build(
+        bind: BindOptions,
+        meter: WriteMeter,
+        tls: &TlsSettings<'_>,
+    ) -> anyhow::Result<Connector> {
         let builder = hyper_rustls::HttpsConnectorBuilder::new()
             .with_tls_config(client_config(tls)?)
             .https_or_http();
@@ -306,11 +329,11 @@ mod imp {
         Ok(ReportingConnector(if tls.http2 {
             builder
                 .enable_all_versions()
-                .wrap_connector(BoundConnector::new(bind))
+                .wrap_connector(BoundConnector::new(bind, meter.clone()))
         } else {
             builder
                 .enable_http1()
-                .wrap_connector(BoundConnector::new(bind))
+                .wrap_connector(BoundConnector::new(bind, meter.clone()))
         }))
     }
 }
@@ -319,7 +342,7 @@ mod imp {
 mod imp {
     use anyhow::{bail, Context as _};
 
-    use super::{split_pem, BindOptions, BoundConnector, TlsSettings};
+    use super::{split_pem, BindOptions, BoundConnector, TlsSettings, WriteMeter};
 
     pub type Connector = hyper_tls::HttpsConnector<BoundConnector>;
 
@@ -329,7 +352,11 @@ mod imp {
     // session to ask directly. A run over this backend therefore reports
     // whether the connection was encrypted, but not with what.
 
-    pub fn build(bind: BindOptions, tls: &TlsSettings<'_>) -> anyhow::Result<Connector> {
+    pub fn build(
+        bind: BindOptions,
+        meter: WriteMeter,
+        tls: &TlsSettings<'_>,
+    ) -> anyhow::Result<Connector> {
         let mut builder = native_tls::TlsConnector::builder();
 
         if tls.skip_verify {
@@ -357,7 +384,7 @@ mod imp {
 
         let connector = builder.build().context("cannot initialise TLS")?;
         let mut https = hyper_tls::HttpsConnector::from((
-            BoundConnector::new(bind),
+            BoundConnector::new(bind, meter.clone()),
             tokio_native_tls::TlsConnector::from(connector),
         ));
         // Plain HTTP backends must keep working.

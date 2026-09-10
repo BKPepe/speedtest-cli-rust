@@ -432,17 +432,18 @@ impl Server {
 
         let url = url_join_path(&self.get_url()?, &self.upload_url);
 
+        // Count what the kernel takes, not what hyper asks for. hyper reads
+        // several hundred kilobytes ahead per connection to fill its write
+        // queue, and the end of the window throws that away again -- after it
+        // had already been added to the total. On a slow uplink the queue is a
+        // large share of everything the test moved.
         counter.start();
+        client.write_meter().install(counter.clone());
         let spinner = self.start_transfer_spinner("Uploading...  ", opts, &counter);
 
         let mut tasks: JoinSet<StreamEnd> = JoinSet::new();
         for _ in 0..opts.requests {
-            tasks.spawn(upload_once(
-                client.clone(),
-                url.clone(),
-                counter.clone(),
-                payload.clone(),
-            ));
+            tasks.spawn(upload_once(client.clone(), url.clone(), payload.clone()));
             tokio::time::sleep(RAMP_UP_DELAY).await;
         }
 
@@ -459,12 +460,7 @@ impl Server {
                 _ = tokio::time::sleep_until(deadline) => break,
                 Some(res) = tasks.join_next(), if !tasks.is_empty() => {
                     if matches!(res, Ok(end) if end.replaceable()) {
-                        tasks.spawn(upload_once(
-                            client.clone(),
-                            url.clone(),
-                            counter.clone(),
-                            payload.clone(),
-                        ));
+                        tasks.spawn(upload_once(client.clone(), url.clone(), payload.clone()));
                     }
                 }
             }
@@ -472,6 +468,7 @@ impl Server {
         // Abort the in-flight transfers and wait for them to unwind before
         // reading the counter, so the reported total cannot change under us.
         tasks.shutdown().await;
+        client.write_meter().clear();
         if let Some(ticker) = ticker {
             ticker.stop().await;
         }
@@ -652,19 +649,15 @@ async fn download_once(client: HttpClient, url: Url, counter: Arc<BytesCounter>)
         .unwrap_or(StreamEnd::TransferFailed)
 }
 
-/// Uploads once, counting every byte sent. Returns whether it completed.
-async fn upload_once(
-    client: HttpClient,
-    url: Url,
-    counter: Arc<BytesCounter>,
-    payload: Option<Bytes>,
-) -> StreamEnd {
+/// Uploads once. The bytes are counted by the client's write meter, on the
+/// socket. Returns whether it completed.
+async fn upload_once(client: HttpClient, url: Url, payload: Option<Bytes>) -> StreamEnd {
     let fut = async {
         let mk_body = || {
             BodyExt::boxed(UploadBody {
                 payload: payload.clone(),
                 pos: 0,
-                counter: counter.clone(),
+                filler: Bytes::from(random_data(UPLOAD_CHUNK)),
             })
         };
 
@@ -702,7 +695,8 @@ async fn upload_once(
 struct UploadBody {
     payload: Option<Bytes>,
     pos: usize,
-    counter: Arc<BytesCounter>,
+    /// The block sent over and over when there is no pre-allocated payload.
+    filler: Bytes,
 }
 
 impl Body for UploadBody {
@@ -738,10 +732,14 @@ impl Body for UploadBody {
                 this.pos = end;
                 out
             }
-            None => Bytes::from(random_data(UPLOAD_CHUNK)),
+            // One block per request, resliced, rather than a fresh one per
+            // frame. The point of --no-pre-allocate is not to hold the whole
+            // payload, which 64 KiB does not; generating it again for every
+            // frame cost about seventeen times the CPU of the pre-allocated
+            // path and saved no memory at all.
+            None => this.filler.clone(),
         };
 
-        this.counter.add(chunk.len() as u64);
         Poll::Ready(Some(Ok(Frame::data(chunk))))
     }
 }
@@ -879,6 +877,37 @@ mod transfer_tests {
             started.elapsed() >= window,
             "phase ended after {:?}, before its {window:?} window",
             started.elapsed()
+        );
+    }
+
+    /// The upload body must not count anything: the bytes are counted in the
+    /// connector, when the socket accepts them. Counting here instead measured
+    /// hyper's write queue, which the end of the window discards.
+    #[tokio::test]
+    async fn the_upload_body_does_not_count_the_bytes_it_hands_over() {
+        use http_body_util::BodyExt as _;
+
+        let counter = Arc::new(BytesCounter::new());
+        let mut body = UploadBody {
+            payload: Some(Bytes::from(vec![0u8; 4 * UPLOAD_CHUNK])),
+            pos: 0,
+            filler: Bytes::from_static(b""),
+        };
+
+        let mut handed = 0usize;
+        while let Some(frame) = body.frame().await {
+            handed += frame.unwrap().into_data().unwrap().len();
+        }
+
+        assert_eq!(
+            handed,
+            4 * UPLOAD_CHUNK,
+            "the whole payload must be handed over"
+        );
+        assert_eq!(
+            counter.total(),
+            0,
+            "the body counted bytes that may never reach the socket"
         );
     }
 }
