@@ -13,6 +13,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use http::Uri;
+use hyper_util::client::legacy::connect::{Connected, Connection};
 use hyper_util::rt::TokioIo;
 use socket2::{SockRef, TcpKeepalive};
 use tokio::net::{TcpSocket, TcpStream};
@@ -225,8 +226,70 @@ impl BoundConnector {
     }
 }
 
+/// The address a request's connection actually reached.
+///
+/// Attached to the connection so it reaches the response through hyper's
+/// connection extras: a hostname can resolve to several addresses, in either
+/// family, and a reconnect can land on a different one, so which address a
+/// measurement ran against is not derivable from the URL.
+#[derive(Clone, Copy, Debug)]
+pub struct PeerAddr(pub SocketAddr);
+
+/// A connected stream that remembers which address it reached.
+#[derive(Debug)]
+pub struct TrackedStream {
+    inner: TokioIo<TcpStream>,
+    peer: SocketAddr,
+}
+
+impl Connection for TrackedStream {
+    fn connected(&self) -> Connected {
+        Connected::new().extra(PeerAddr(self.peer))
+    }
+}
+
+impl hyper::rt::Read for TrackedStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: hyper::rt::ReadBufCursor<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl hyper::rt::Write for TrackedStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
+    }
+
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write_vectored(cx, bufs)
+    }
+}
+
 impl tower_service::Service<Uri> for BoundConnector {
-    type Response = TokioIo<TcpStream>;
+    type Response = TrackedStream;
     type Error = io::Error;
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
@@ -250,7 +313,16 @@ impl tower_service::Service<Uri> for BoundConnector {
             let mut last_err = None;
             for addr in addrs {
                 match connect_one(addr, &opts).await {
-                    Ok(stream) => return Ok(TokioIo::new(stream)),
+                    Ok(stream) => {
+                        // Ask the socket rather than trusting `addr`: with a
+                        // hostname that resolves to several addresses, only
+                        // the socket knows which one answered.
+                        let peer = stream.peer_addr().unwrap_or(addr);
+                        return Ok(TrackedStream {
+                            inner: TokioIo::new(stream),
+                            peer,
+                        });
+                    }
                     Err(e) => last_err = Some(e),
                 }
             }
